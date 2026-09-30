@@ -1,0 +1,6 @@
+.idea
+data
+data_store
+reports
+__pycache__
+.env
