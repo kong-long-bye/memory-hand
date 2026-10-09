@@ -2,7 +2,8 @@
 import os
 from pathlib import Path
 
-import requests
+from openai import OpenAI
+
 _ROOT = Path(__file__).parent
 _ENV_LOADED = False
 _CACHE = {}  # text -> summary，数据集中有重复文本，缓存可省调用
@@ -33,59 +34,54 @@ def _load_dotenv():
         key, val = line.split("=", 1)
         os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
-# 配置api ，url
-def _cfg() ->dict:
+# 配置 api、url、model
+def _cfg() -> dict:
     _load_dotenv() # 加载 .env 文件
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
 
-    mode = os.environ.get("LLM_MODE", "").strip().lower()
+    # LLM_MODE 就是模型名；不要 .lower()，部分模型 ID 大小写敏感（如 ZHIPU/GLM-5.3-FlashX）
+    model = os.environ.get("LLM_MODE", "").strip()
     try:
-        timeout = float(os.environ.get("LLM_TIMEOUT", "20"))
+        timeout = float(os.environ.get("LLM_TIMEOUT", "60"))
     except ValueError:
-        timeout = 20.0
+        timeout = 60.0
 
     return {
-        "mode": mode,
         "api_key": api_key,
         "base_url": base_url.rstrip("/"),
-        "model": os.environ.get("LLM_MODEL", "").strip() ,
+        "model": model,
         "timeout": timeout,
     }
 
-# 调用api：OpenAI Chat Completions 兼容接口；失败/未配置返回空串，由上层回退到离线抽取式摘要
+# 调用api：使用 OpenAI 官方 SDK 请求 Chat Completions 兼容接口
 def _call_api(text: str) -> str:
     cfg = _cfg()
-    # 判定是否启用 LLM：mode 显式关闭 或 关键三项缺失都视为不可用
-    if cfg["mode"] in ("", "none", "off", "disabled"):
+    # 模型名为空或显式关闭，以及关键配置缺失，都视为不可用
+    if cfg["model"].lower() in ("", "none", "off", "disabled"):
         return ""
-    if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
+    if not (cfg["api_key"] and cfg["base_url"]):
         return ""
 
-    url = cfg["base_url"] + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": cfg["model"],
-        "messages": [
-            {"role": "system", "content": _SUMMARY_SYSTEM},
-            {"role": "user", "content": text},
-        ],
-        "temperature": 0,
-        "max_tokens": 128,
-        "stream": False,
-    }
+    client = OpenAI(
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+        timeout=cfg["timeout"],
+    )
     try:
-        resp = requests.post(url, headers=headers, json=payload,
-                             timeout=cfg["timeout"])
-        resp.raise_for_status()
-        data = resp.json()
-        # 标准 OpenAI 响应：choices[0].message.content
-        return (data["choices"][0]["message"]["content"] or "").strip()
+        completion = client.chat.completions.create(
+            model=cfg["model"],
+            messages=[
+                {"role": "system", "content": _SUMMARY_SYSTEM},
+                {"role": "user", "content": text},
+            ],
+            temperature=0,
+
+        )
+        return (completion.choices[0].message.content or "").strip()
     except Exception:  # noqa: BLE001
-        # 网络/鉴权/限流/结构异常统一吞掉，让 summarize() 走离线回退
+        # 网络/鉴权/超时/结构异常均返回空串，由 summarize() 统一抛错；
+        # 注意这会将真实原因掩盖成“未配置”，排查时需先打印异常。
         return ""
 
 
@@ -108,11 +104,10 @@ def summarize(text: str) -> str:
 
 
 if __name__ == "__main__":
+    # 注意：demo 需是真实 memory 文本；喂“你好”这类退化输入，
+    # 推理模型会把 max_tokens 全花在思考上导致 content 为空。
     demo = (
-        "In repository keystone-services, the refresh_cache() function in "
-        "cache.py returned stale data because the TTL comparison used seconds "
-        "while the expiry field was stored in milliseconds. Fixed by normalizing "
-        "both sides to milliseconds before comparison."
+        "你好"
     )
-    print("mode   :", _cfg()["mode"] or "<none>")
+    print("model  :", _cfg()["model"] or "<none>")
     print("summary:", summarize(demo))

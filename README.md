@@ -56,15 +56,25 @@ python dataset_adapter.py          # 打印数据集摘要
 python evaluate.py                 # 默认跑 validation.jsonl，输出 Recall@5/10、MRR、nDCG@10、Noise@10、HN-Rejection
 ```
 
-`.env` 关键项（未填 LLM 会自动走离线抽取式回退，不影响 Day 1 baseline）：
+`.env` 关键项（`LLM_MODE` 即模型名；未填或填 `none` 时 `summarize()` 直接抛 `RuntimeError`，不再有离线回退）：
 
 ```
-LLM_MODE=openai          # 关闭改为 none
+LLM_MODE=deepseek-v4-flash-0731    # 模型名；填 none/off/disabled 关闭 LLM
 OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1
-LLM_MODEL=gpt-4o-mini    # 比赛开源榜要求
-LLM_TIMEOUT=20
+OPENAI_BASE_URL=https://llm-ootiyzorwljt31m7.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 ```
+
+切换生产（OpenAI 官方，比赛开源榜要求）：
+
+```
+OPENAI_BASE_URL=https://api.openai.com/v1
+LLM_MODE=gpt-4o-mini
+LLM_TIMEOUT=20          # 不填默认 60s；gpt-4o-mini 非推理模型，20s 足够
+```
+
+> LLM 调用走 OpenAI 官方 SDK（`openai`），`base_url` / `api_key` / `model` 均来自上述环境变量。
+> 推理型模型（如 deepseek-v4-flash）的思考内容也计入 `max_tokens`，
+> 预算过小会出现 HTTP 200 但 `content` 为空串，故 `max_tokens` 留到 2048、超时默认 60s。
 
 ---
 
