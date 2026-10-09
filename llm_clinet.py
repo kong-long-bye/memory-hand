@@ -53,6 +53,66 @@ def _cfg() ->dict:
         "timeout": timeout,
     }
 
-# 调用api
-def _call_api(text:str) -> str:
-    pass
+# 调用api：OpenAI Chat Completions 兼容接口；失败/未配置返回空串，由上层回退到离线抽取式摘要
+def _call_api(text: str) -> str:
+    cfg = _cfg()
+    # 判定是否启用 LLM：mode 显式关闭 或 关键三项缺失都视为不可用
+    if cfg["mode"] in ("", "none", "off", "disabled"):
+        return ""
+    if not (cfg["api_key"] and cfg["base_url"] and cfg["model"]):
+        return ""
+
+    url = cfg["base_url"] + "/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {cfg['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": _SUMMARY_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0,
+        "max_tokens": 128,
+        "stream": False,
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload,
+                             timeout=cfg["timeout"])
+        resp.raise_for_status()
+        data = resp.json()
+        # 标准 OpenAI 响应：choices[0].message.content
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception:  # noqa: BLE001
+        # 网络/鉴权/限流/结构异常统一吞掉，让 summarize() 走离线回退
+        return ""
+
+
+
+
+# 对外主入口：LLM 摘要 + 进程内缓存
+def summarize(text: str) -> str:
+    """把一条原始 memory 压缩成一句摘要；相同 text 命中缓存不再调用 API。"""
+    if not text:
+        return ""
+    key = text.strip()
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+    summary = _call_api(key)
+    if not summary:
+        raise RuntimeError("LLM 调用失败或未配置，无法生成摘要")
+    _CACHE[key] = summary
+    return summary
+
+
+if __name__ == "__main__":
+    demo = (
+        "In repository keystone-services, the refresh_cache() function in "
+        "cache.py returned stale data because the TTL comparison used seconds "
+        "while the expiry field was stored in milliseconds. Fixed by normalizing "
+        "both sides to milliseconds before comparison."
+    )
+    print("mode   :", _cfg()["mode"] or "<none>")
+    print("summary:", summarize(demo))
