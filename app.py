@@ -63,7 +63,7 @@ def health():
 def add_memory(req: AddRequest):
     store.add(
         request_id=req.request_id,
-        messages=[m.model_dump(exclude_none=True) for m in req.messages],
+        messages=[m.model_dump(exclude_none=True) for m in req.messages],# 将模型对象转换为字典，并排除 None 值
         user_id=req.user_id,
         session_id=req.session_id,
     )
@@ -77,6 +77,12 @@ def add_memory(req: AddRequest):
 # 搜索记忆
 @app.post("/search", response_model=SearchResponse)
 def search_memory(req: SearchRequest):
-    query = req.query
+    results = store.search(
+        query=req.query,
+        
+        user_id=req.user_id,
+        top_k=req.top_k,
+    )
+    return SearchResponse(data=results)
     
 
