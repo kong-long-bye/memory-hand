@@ -4,3 +4,8 @@ data_store
 reports
 __pycache__
 .env
+
+# 部署产物
+dist/
+*.tar
+*.tar.gz

@@ -11,7 +11,7 @@
 - [1. 项目结构](#1-项目结构)
 - [2. 本地运行](#2-本地运行)
 - [3. 官方比赛要求总结（代码/文本赛道）](#3-官方比赛要求总结代码文本赛道)
-- [4. 部署教程（公网 IP + Docker）](#4-部署教程公网-ip--docker一条路径)
+- [4. 部署教程（镜像 tar + 一键脚本）](#4-部署教程镜像-tar-上传--一键启动)
 - [5. 提交材料清单](#5-提交材料清单)
 - [6. 常见坑与自检](#6-常见坑与自检)
 
@@ -28,7 +28,10 @@ memory-hand/
 ├── llm_clinet.py         # LLM 摘要客户端（Day 2 Memory Schema 用）
 ├── requirements.txt
 ├── .env                  # API Key（已 gitignore，不提交）
-├── Dockerfile            # 生产部署镜像
+├── Dockerfile            # 生产镜像
+├── docker-compose.yml    # 服务器侧 compose（与镜像包一起上传）
+├── deploy.sh             # 服务器一键部署脚本
+├── dist/                 # docker save 产物（.gitignore已忽略）
 ├── data_store/           # 运行时持久化目录（挂载卷）
 └── PLAN_10_DAYS.md       # 10 天优化路线图
 ```
@@ -41,11 +44,11 @@ memory-hand/
 # 1) 安装依赖
 pip install -r requirements.txt
 
-# 2) 启动服务（默认 8000 端口）
-uvicorn app:app --host 0.0.0.0 --port 8000
+# 2) 启动服务（默认 8080 端口，与服务器保持一致）
+uvicorn app:app --host 0.0.0.0 --port 8080
 
 # 3) 冒烟自检
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8080/health
 # -> {"status":"ok"}
 
 # 4) 导入数据 + 本地评测（需先建一个 run_add_client 或直接用 dataset_adapter 内置的 build_add_requests）
@@ -147,69 +150,95 @@ Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at"
 
 ---
 
-## 4. 部署教程（公网 IP + Docker，一条路径）
+## 4. 部署教程（镜像 tar 上传 + 一键启动）
 
-比赛只要求：**公网可访问 + Add/Search 契约正确 + 版本可追溯 + data_store 不丢**。部署方案就一条：一台带公网 IPv4 的云主机，Docker 直接暴露端口，安全组放行。
+前提：服务器**不能访问 Docker Hub / 镜像仓库**，一切依赖本地构建后把镜像打包上传。部署方式固定为一键脚本 `deploy.sh`。
 
-### 4.1 部署四步
+目录约定（服务器上）：
 
-**Step 1 — 买一台带公网 IPv4 的云主机**（阿里云 ECS / 腾讯云 CVM / AWS Lightsail 都行，最低 2c2g 够用），安全组放开 `8000/tcp`（或你选的任意端口）。
+```
+/opt/memory-hand/
+├── memory-hand-v0.1.0.tar.gz   # docker save 导出的镜像包
+├── docker-compose.yml          # 仓库里拷一份
+├── .env                        # 环境变量（自行上传，不在仓库）
+├── deploy.sh                   # 仓库里拷一份
+└── data_store/                 # 持久化目录（deploy.sh 自动创建）
+```
 
-**Step 2 — 服务器上装 Docker**（官方 `get.docker.com` 一键脚本即可）。
+### 4.1 四步部署
 
-**Step 3 — 构建镜像并跑起来**（本地或服务器 build 均可）：
+**Step 1 — 本地构建镜像**
 
 ```bash
-# 本地 build 后推到镜像仓库（阿里云 ACR / Docker Hub）
+cd d:\Code\study\memory-hand
 git rev-parse --short HEAD                       # 得到 sha，例如 0620fb7
-docker build -t memory-hand:day1-0620fb7 .
-docker tag  memory-hand:day1-0620fb7 registry.cn-beijing.aliyuncs.com/<ns>/memory-hand:day1-0620fb7
-docker push registry.cn-beijing.aliyuncs.com/<ns>/memory-hand:day1-0620fb7
-
-# 服务器上直接跑，把 data_store 挂到宿主机避免重启丢数据
-mkdir -p /opt/memory-hand/data_store
-docker run -d --name memory-hand \
-  -p 8000:8000 \
-  -v /opt/memory-hand/data_store:/app/data_store \
-  --env-file /opt/memory-hand/.env \
-  --restart unless-stopped \
-  registry.cn-beijing.aliyuncs.com/<ns>/memory-hand:day1-0620fb7
+docker build -t memory-hand:v0.1.0 .
 ```
 
-**Step 4 — 本地直接验证**：
+**Step 2 — 本地导出镜像包**
 
 ```bash
-curl http://<公网IP>:8000/health
-# -> {"status":"ok"}
+mkdir -p dist
+docker save memory-hand:v0.1.0 | gzip > dist/memory-hand-v0.1.0.tar.gz
+ls -lh dist/                                      # 一般 100–200MB
 ```
 
-提交给平台的 API Endpoint 就填 `http://<公网IP>:8000`。
+**Step 3 — 上传 4 个文件到服务器**
 
-> 当前 BM25 索引和幂等 set 都是**进程内**状态，镜像 CMD 已经固定 `--workers 1`；要横向扩展需先把存储后端换成 SQLite/Redis。
+```bash
+IP=<公网IP>
+ssh root@$IP "mkdir -p /opt/memory-hand"
+scp dist/memory-hand-v0.1.0.tar.gz root@$IP:/opt/memory-hand/
+scp docker-compose.yml             root@$IP:/opt/memory-hand/
+scp deploy.sh                      root@$IP:/opt/memory-hand/
+scp .env                           root@$IP:/opt/memory-hand/
+ssh root@$IP "chmod 600 /opt/memory-hand/.env"
+```
 
-### 4.2 部署自检清单（提交前逐条打勾）
+**Step 4 — 服务器上执行 `deploy.sh`**
 
-- [ ] `curl http://<公网IP>:8000/health` 返回 `{"status":"ok"}`
+```bash
+ssh root@$IP
+cd /opt/memory-hand
+bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v0.1.0.tar.gz
+```
+
+脚本依次做 4 件事：
+1. 预检（镜像包 / compose / .env / docker 存在）
+2. `docker load -i <tar>` 导入镜像
+3. `docker compose up -d` 启动（自动挂 `data_store`，`--restart=unless-stopped`）
+4. `curl http://127.0.0.1:8080/health` 探测，失败自动 `docker compose logs --tail 50`
+
+验证成功后，平台 API Endpoint 填 `http://<公网IP>:8080`。
+
+### 4.2 升级 / 回滚
+
+- 升级：本地重新 build 一个新 tag（如 `v0.1.1`），`docker save` 后 scp 上去，改一下 compose 里的 `image:` 行，重跑 `bash deploy.sh`。脚本会先 `docker compose down` 再 `up`。
+- 回滚：只要旧镜像包还在 `/opt/memory-hand/` 里，把 compose 的 `image:` 改回旧 tag，再跑一次 `deploy.sh <旧包名>` 即可。`data_store/` 内的 JSONL 不删。
+
+### 4.3 部署自检清单（申请 Key 前逐条打勾）
+
+- [ ] `curl http://<公网IP>:8080/health` 返回 `{"status":"ok"}`
 - [ ] `POST /add` 官方样例 payload 返回 200 且 `success=true`
 - [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/memory.jsonl` 只有一条（幂等）
 - [ ] `POST /search` 对刚写入的 `user_id` 能召回，`top_k` 生效
 - [ ] `user_id=A` 的查询召不回 `user_id=B` 的记忆（**跨用户隔离**，红线）
-- [ ] 安全组已放开对应端口；`ss -lntp` 看到 uvicorn 监听 `0.0.0.0:8000`
-- [ ] `docker image inspect` 或 `git rev-parse HEAD` 得到的版本 tag 与提交材料一致
-- [ ] `data_store/` 是宿主机挂载目录，重启不丢数据
+- [ ] 安全组已放开 `8080/tcp`
+- [ ] `docker images` 能看到 `memory-hand:v0.1.0`；git tag / compose image tag / 提交材料三者一致
+- [ ] `/opt/memory-hand/data_store/` 存在且可写，容器重启不丢数据
 - [ ] `.env` 权限 `600`，`git status` 确认 `.env` 未被追踪
 
-### 4.3 容量、超时、限流申报模板（写进提交材料，直接抄）
+### 4.4 容量、超时、限流申报模板（写进提交材料，直接抄）
 
 ```
-API Endpoint        : http://<公网IP>:8000
+API Endpoint        : http://<公网IP>:8080
 Auth                : None
 Concurrency         : 16 RPS sustained（单 worker，够用）
 Timeout             : Search P95 <= 3s；Add P95 <= 2s；平台侧建议设 30s
-Rate Limit          : 无（如需可加 uvicorn --limit-concurrency 64）
+Rate Limit          : 无
 Payload Size        : Add 单请求 <= 32MB
 Data Persistence    : JSONL 挂载卷 /opt/memory-hand/data_store
-Version             : Docker image memory-hand:day1-0620fb7
+Version             : Docker image memory-hand:v0.1.0 (git <sha>)
 Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 ```
 
@@ -223,7 +252,7 @@ Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 2. **可复现代码**：本仓库 commit hash（如 `0620fb7`）+ Dockerfile + `requirements.txt`。
 3. **运行说明**：本 README §4；关键环境变量说明。
 4. **API 契约文档**：本 README §3.2；请求/响应实例附在 `docs/api_examples.md`（可选）。
-5. **容量声明**：本 README §4.3 表。
+5. **容量声明**：本 README §4.4 表。
 6. **Benchmark 自测报告**：`reports/eval_<run_id>_<ts>.json`，展示 Recall@5/10、MRR、nDCG@10、Noise@10、HN-Rejection。
 7. **方法说明**：当前 = BM25 + 中英混合分词 + JSONL 持久化；10 天路线见 `PLAN_10_DAYS.md`（Day 2 LLM 摘要、Day 3 向量、Day 4 RRF、Day 5 Code-aware Rerank、Day 7 Query Rewrite…）。
 

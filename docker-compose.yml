@@ -1,0 +1,19 @@
+# 服务器侧运行 compose（不依赖 registry，镜像由 deploy.sh 通过 docker load 预加载）
+# 使用：docker compose up -d
+services:
+  memory-hand:
+    image: memory-hand:v0.1.0
+    container_name: memory-hand
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./data_store:/app/data_store
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
