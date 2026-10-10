@@ -132,7 +132,7 @@ def evaluate_condition(base_url: str, samples: list, condition: str,
 def main():
     # 设置参数
     parser = argparse.ArgumentParser(description="local retrieval evaluation")
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:7878")
     parser.add_argument("--data", default=None,
                         help="数据集 jsonl 路径（默认 validation.jsonl，需与导入一致）")
     parser.add_argument("--run-id", default="local")

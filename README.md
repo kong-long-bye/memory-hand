@@ -44,11 +44,11 @@ memory-hand/
 # 1) 安装依赖
 pip install -r requirements.txt
 
-# 2) 启动服务（默认 8080 端口，与服务器保持一致）
-uvicorn app:app --host 0.0.0.0 --port 8080
+# 2) 启动服务（默认 7878 端口，与服务器保持一致）
+uvicorn app:app --host 0.0.0.0 --port 7878
 
 # 3) 冒烟自检
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:7878/health
 # -> {"status":"ok"}
 
 # 4) 导入数据 + 本地评测（需先建一个 run_add_client 或直接用 dataset_adapter 内置的 build_add_requests）
@@ -168,7 +168,7 @@ Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at"
 
 ```
 /opt/memory-hand/
-├── memory-hand-v0.1.0.tar.gz   # docker save 导出的镜像包
+├── memory-hand-v0.1.1.tar        # docker save -o 导出的镜像包
 ├── docker-compose.yml          # 仓库里拷一份
 ├── .env                        # 环境变量（自行上传，不在仓库）
 ├── deploy.sh                   # 仓库里拷一份
@@ -181,16 +181,19 @@ Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at"
 
 ```bash
 cd d:\Code\study\memory-hand
-git rev-parse --short HEAD                       # 得到 sha，例如 0620fb7
-docker build -t memory-hand:v0.1.0 .
+# 每次改动必须换一个新 tag，否则 docker load 会命中同名旧镜像缓存，
+# 服务器实际跑的还是旧代码（端口、LLM 客户端修复全部失效）
+docker build -t memory-hand:v0.1.1 .
+docker run --rm memory-hand:v0.1.1 ps aux | head -1   # 可选：确认 CMD 已含 --port 7878
 ```
 
 **Step 2 — 本地导出镜像包**
 
 ```bash
 mkdir -p dist
-docker save memory-hand:v0.1.0 | gzip > dist/memory-hand-v0.1.0.tar.gz
-ls -lh dist/                                      # 一般 100–200MB
+# 用 -o 指定输出文件；Windows PowerShell 没有 gzip，不要用 `| gzip`
+docker save -o dist/memory-hand-v0.1.1.tar memory-hand:v0.1.1
+ls -lh dist/                                      # 一般 200–400MB
 ```
 
 **Step 3 — 上传 4 个文件到服务器**
@@ -198,7 +201,7 @@ ls -lh dist/                                      # 一般 100–200MB
 ```bash
 IP=<公网IP>
 ssh root@$IP "mkdir -p /opt/memory-hand"
-scp dist/memory-hand-v0.1.0.tar.gz root@$IP:/opt/memory-hand/
+scp dist/memory-hand-v0.1.1.tar     root@$IP:/opt/memory-hand/
 scp docker-compose.yml             root@$IP:/opt/memory-hand/
 scp deploy.sh                      root@$IP:/opt/memory-hand/
 scp .env                           root@$IP:/opt/memory-hand/
@@ -210,16 +213,26 @@ ssh root@$IP "chmod 600 /opt/memory-hand/.env"
 ```bash
 ssh root@$IP
 cd /opt/memory-hand
-bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v0.1.0.tar.gz
+bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v0.1.1.tar
 ```
 
 脚本依次做 4 件事：
 1. 预检（镜像包 / compose / .env / docker 存在）
 2. `docker load -i <tar>` 导入镜像
 3. `docker compose up -d` 启动（自动挂 `data_store`，`--restart=unless-stopped`）
-4. `curl http://127.0.0.1:8080/health` 探测，失败自动 `docker compose logs --tail 50`
+4. `curl http://127.0.0.1:7878/health` 探测，失败自动 `docker compose logs --tail 50`
 
-验证成功后，平台 API Endpoint 填 `http://<公网IP>:8080`。
+验证成功后，服务在服务器本地监听 `7878`。若公网端口与容器端口不同（例如云主机做了 `17187 -> 7878` 映射），平台 API Endpoint 应填映射后的公网地址 `http://<公网IP>:17187`，而不是 7878。
+
+排查顺序（从内向外，定位是哪一层断了）：
+
+```bash
+docker logs memory-hand | grep Uvicorn     # 1) 容器内实际监听端口，必须是 0.0.0.0:7878
+docker ps  --filter name=memory-hand       # 2) PORTS 必须是 0.0.0.0:7878->7878/tcp，无多余 8080/tcp
+curl http://127.0.0.1:7878/health          # 3) 服务器自身可达
+firewall-cmd --list-ports                  # 4) 系统防火墙未放行则外部连不上
+```
+若 1–3 全通但公网 `ERR_CONNECTION_REFUSED`，问题在云厂商端口映射/安全组，与应用无关。
 
 ### 4.2 升级 / 回滚
 
@@ -228,27 +241,27 @@ bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v
 
 ### 4.3 部署自检清单（申请 Key 前逐条打勾）
 
-- [ ] `curl http://<公网IP>:8080/health` 返回 `{"status":"ok"}`
+- [ ] `curl http://<公网IP>:7878/health` 返回 `{"status":"ok"}`
 - [ ] `POST /add` 官方样例 payload 返回 200 且 `success=true`
 - [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/memory.jsonl` 只有一条（幂等）
 - [ ] `POST /search` 对刚写入的 `user_id` 能召回，`top_k` 生效
 - [ ] `user_id=A` 的查询召不回 `user_id=B` 的记忆（**跨用户隔离**，红线）
-- [ ] 安全组已放开 `8080/tcp`
-- [ ] `docker images` 能看到 `memory-hand:v0.1.0`；git tag / compose image tag / 提交材料三者一致
+- [ ] 安全组/防火墙已放开服务器 `7878/tcp`，以及云主机映射的公网端口（如 `17187`）
+- [ ] `docker images` 能看到 `memory-hand:v0.1.1`；git tag / compose image tag / 提交材料三者一致
 - [ ] `/opt/memory-hand/data_store/` 存在且可写，容器重启不丢数据
 - [ ] `.env` 权限 `600`，`git status` 确认 `.env` 未被追踪
 
 ### 4.4 容量、超时、限流申报模板（写进提交材料，直接抄）
 
 ```
-API Endpoint        : http://<公网IP>:8080
+API Endpoint        : http://<公网IP>:17187   # 云主机映射端口，容器内为 7878
 Auth                : None
 Concurrency         : 16 RPS sustained（单 worker，够用）
 Timeout             : Search P95 <= 3s；Add P95 <= 2s；平台侧建议设 30s
 Rate Limit          : 无
 Payload Size        : Add 单请求 <= 32MB
 Data Persistence    : JSONL 挂载卷 /opt/memory-hand/data_store
-Version             : Docker image memory-hand:v0.1.0 (git <sha>)
+Version             : Docker image memory-hand:v0.1.1 (git <sha>)
 Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 ```
 

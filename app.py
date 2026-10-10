@@ -2,7 +2,7 @@
 """Memory Service：FastAPI 实现官方 /health /add /search 三个接口。
 
 启动：
-    uvicorn app:app --host 0.0.0.0 --port 8000
+    uvicorn app:app --host 0.0.0.0 --port 7878
 """
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
