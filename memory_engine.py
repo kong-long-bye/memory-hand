@@ -108,7 +108,7 @@ class MemoryStore:
             docs = self._by_user.get(user_id, [])
             if not docs:
                 return []
-            bm25, docs = self._get_index(user_id) # 获取索引，bm25和docs列表
+            bm25, _tokens = self._get_index(user_id) # 获取索引，bm25和分词结果
             #计算分数
             scores = bm25.get_scores(tokenize(query))
             # 排序
