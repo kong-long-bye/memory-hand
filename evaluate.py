@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 
 import dataset_adapter as da
+from memory_engine import memory_id
 
 REPORT_DIR = Path(__file__).parent / "reports"
 
@@ -66,15 +67,15 @@ def noise_at_k(ranked_ids: list, gold: set, k: int) -> float:
     return sum(1 for i in top if i not in gold) / len(top)
 
 
-def map_hits_to_ids(hits: list, content_to_id: dict, self_id: str) -> list:
-    """把 /search 返回的 content 精确映射回经验 ID。
+def map_hits_to_ids(hits: list, mem_id_to_exp: dict, self_id: str) -> list:
+    """把 /search 返回项的内容寻址 id 映射回经验 ID。
 
     查询任务本身可能同时存在于经验池里（SWEContextBench 有 1 例），
     命中自己会给出虚假的 rank 1，故直接丢弃。
     """
     ranked = []
     for h in hits:
-        id = content_to_id.get(h.get("content"))
+        id = mem_id_to_exp.get(h.get("id"))
         if id is None:
             ranked.append(f"<unmapped:{h.get('id')}>")
         elif id != self_id:
@@ -88,14 +89,17 @@ def map_hits_to_ids(hits: list, content_to_id: dict, self_id: str) -> list:
 def evaluate_condition(base_url: str, samples: list, memories: list,
                        condition: str, run_id: str, top_k: int) -> dict:
     allowed = {m["id"] for m in memories}
-    content_to_id = {}
+    # 映射键 = 服务端 content 的 sha256 前 12 位（memory_engine.memory_id），
+    # 前提：写入用的是 dataset_adapter.experience_text 的原文，服务端不加工内容。
+    mem_id_to_exp = {}
     dup = 0
     for m in memories:
-        if m["content"] in content_to_id:
+        key = memory_id(m["content"])
+        if key in mem_id_to_exp and mem_id_to_exp[key] != m["id"]:
             dup += 1
-        content_to_id.setdefault(m["content"], m["id"])
+        mem_id_to_exp.setdefault(key, m["id"])
     if dup:
-        print(f"  warn: {dup} 条记忆 content 完全重复，ID 映射可能错配")
+        print(f"  warn: {dup} 个记忆 id 对应多条不同经验，ID 映射会错配")
 
     per_task = []
     agg = defaultdict(float)
@@ -108,7 +112,7 @@ def evaluate_condition(base_url: str, samples: list, memories: list,
                              json=payload, timeout=120)
         resp.raise_for_status()
         hits = resp.json().get("data", [])
-        ranked_ids = map_hits_to_ids(hits, content_to_id, sample["task_id"])
+        ranked_ids = map_hits_to_ids(hits, mem_id_to_exp, sample["task_id"])
 
         metrics = {
             "task_id": sample["task_id"],
@@ -116,6 +120,7 @@ def evaluate_condition(base_url: str, samples: list, memories: list,
             "n_pool": len(memories),
             "n_gold": len(gold),
             "n_returned": len(ranked_ids),
+            "n_unmapped": sum(1 for i in ranked_ids if i.startswith("<unmapped")),
             "mrr": mrr(ranked_ids, gold),
             "ndcg@10": ndcg_at_k(ranked_ids, gold, 10),
             "noise@10": noise_at_k(ranked_ids, gold, 10),
@@ -128,7 +133,8 @@ def evaluate_condition(base_url: str, samples: list, memories: list,
         per_task.append(metrics)
 
         for key in [f"recall@{k}" for k in K_LIST] + ["mrr", "ndcg@10",
-                                                      "noise@10", "hn_in_top10"]:
+                                                      "noise@10", "hn_in_top10",
+                                                      "n_unmapped"]:
             agg[key] += metrics[key]
         print(f"[{condition}] ({i}/{len(samples)}) {sample['task_id']} "
               f"gold={sample['gold_memory_ids']} "
@@ -137,6 +143,7 @@ def evaluate_condition(base_url: str, samples: list, memories: list,
 
     n = max(len(samples), 1)
     summary = {key: round(val / n, 4) for key, val in agg.items()}
+    summary["n_unmapped"] = int(agg["n_unmapped"])  # 总量而非均值：门槛要求为 0
     summary["hn_rejection@10"] = round(1.0 - summary.pop("hn_in_top10"), 4)
     summary["n_tasks"] = len(samples)
     summary["n_pool"] = len(memories)

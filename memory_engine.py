@@ -6,7 +6,7 @@
 存储格式（data_store/memory.jsonl，每行一条记忆）::
 
     {
-        "id": "mem_000001",
+        "id": "mem_3a1f9c2b7d10",
         "user_id": "task-0001:noisy:local",
         "session_id": "eval:local:sample:task-0001:noisy",
         "request_id": "eval:local:coding:...:chunk-000",
@@ -18,10 +18,10 @@
 """
 
 import json
+import hashlib
 import math
 import re
 import threading
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,6 +33,14 @@ jieba.setLogLevel(40)
 STORE_DIR = Path(__file__).parent / "data_store" # 数据存储目录
 STORE_PATH = STORE_DIR / "memory.jsonl" # 持久化存储路径
 
+
+def memory_id(content: str) -> str:
+    """内容寻址 ID：同一份原文在任何 user_id 下都得到同一个 id。
+
+    /search 命中项靠它映射回来源记录（评测、去重、后续分块视图都依赖这个可追溯性），
+    不再依赖"返回内容完全等于原文"。
+    """
+    return "mem_" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
 
 
 # 存储结果
@@ -76,7 +84,7 @@ class MemoryStore:
                 return False
             content = _messages_to_text(messages)
             mem = {
-                "id": f"mem_{uuid.uuid4().hex[:12]}",
+                "id": memory_id(content),
                 "user_id": user_id,
                 "session_id": session_id,
                 "request_id": request_id,
