@@ -11,6 +11,7 @@
         "session_id": "eval:local:sample:task-0001:noisy",
         "request_id": "eval:local:coding:...:chunk-000",
         "content": "memory text",
+        "timestamp": 1759032000000,
         "created_at": "2026-09-28T12:00:00Z"
     }
 
@@ -144,8 +145,7 @@ class MemoryStore:
         self._lock = threading.Lock() # 互斥锁
         self._memories = []  # 全量记忆列表
         self._by_user = {}  # user_id -> [memory, ...]
-        self._ids_by_user = {}  # user_id -> {memory_id, ...} 归属去重用
-        self._by_content = {}  # memory_id -> 已落库记录（同一份原文只存一份）
+        self._ids_by_user = {}  # user_id -> {memory_id, ...} 同一 user 内同内容去重
         self._index_by_user = {}  # user_id -> (bm25, docs) # 懒加载，真正需要时才构建
         self._request_ids = set()  # 幂等：request_id 去重
         self._load() # 加载现有数据
@@ -161,15 +161,14 @@ class MemoryStore:
                 if not line:
                     continue
                 mem = json.loads(line)
+                self._request_ids.add(mem.get("request_id"))
                 mid = memory_id(mem["content"])
                 mem["id"] = mid  # id 由内容决定：历史 uuid id 载入即归一，无需重新写入
-                if mid not in self._by_content:
-                    self._by_content[mid] = mem
+                ids = self._ids_by_user.setdefault(mem["user_id"], set())
+                if mid not in ids:  # 同一 user 内同内容的历史重复行，载入时就不再进索引
+                    ids.add(mid)
                     self._memories.append(mem)
-                if mid not in self._ids_by_user.setdefault(mem["user_id"], set()):
-                    self._ids_by_user[mem["user_id"]].add(mid)
                     self._by_user.setdefault(mem["user_id"], []).append(mem)
-                self._request_ids.add(mem.get("request_id"))
     # 将文件写入到磁盘
     def _append_file(self, mem: dict):
         with open(self.path, "a", encoding="utf-8") as f:
@@ -177,23 +176,34 @@ class MemoryStore:
     # 写入
     def add(self, request_id: str, messages: list, user_id: str,
             session_id: str) -> bool:
-        """写入一批 messages；request_id 重复时幂等跳过。返回是否新写入。"""
+        """写入一批 messages；request_id 重复时幂等跳过。返回是否新写入。
+
+        同一 user 内同内容（换了 request_id 重发）也不重复入库：
+        重复项会白占 Top-K 名额并稀释自身关键词的 IDF。
+        """
         with self._lock:
             if request_id and request_id in self._request_ids:
                 return False
             content = _messages_to_text(messages)
+            mid = memory_id(content)
+            if mid in self._ids_by_user.get(user_id, ()):
+                if request_id:
+                    self._request_ids.add(request_id)  # 幂等：request_id 去重
+                return False
             mem = {
-                "id": memory_id(content),
+                "id": mid,
                 "user_id": user_id,
                 "session_id": session_id,
                 "request_id": request_id,
                 "content": content,
+                "timestamp": _messages_timestamp(messages),
                 "created_at": datetime.now(timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"),
             }
             self._append_file(mem)
             self._memories.append(mem)
             self._by_user.setdefault(user_id, []).append(mem)
+            self._ids_by_user.setdefault(user_id, set()).add(mid)
             self._index_by_user.pop(user_id, None)  # 索引失效，为了懒加载、
             if request_id:
                 self._request_ids.add(request_id) # 幂等：request_id 去重
@@ -277,6 +287,7 @@ class MemoryStore:
         with self._lock:
             self._memories.clear()
             self._by_user.clear()
+            self._ids_by_user.clear()
             self._index_by_user.clear()
             self._request_ids.clear()
             if self.path.exists():
@@ -287,6 +298,15 @@ class MemoryStore:
 
 def _messages_to_text(messages) -> str:
     return "\n".join(m["content"] for m in messages)
+
+
+def _messages_timestamp(messages):
+    """一批 messages 里最新的事件时间戳（毫秒），一条记忆只留一个值。
+
+    平台带 timestamp 才有可靠的顺序信号（跨记录邻近平滑要用）；没带时返回 None。
+    """
+    marks = [m.get("timestamp") for m in messages if m.get("timestamp") is not None]
+    return max(marks) if marks else None
 
 # ---------------------------------------------------------------------------
 # Tokenizer（中英混合）：ASCII 标识符拆 snake_case/camelCase；中文用 jieba，缺包回退字符级

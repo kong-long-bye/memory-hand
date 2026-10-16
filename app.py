@@ -77,6 +77,8 @@ def add_memory(req: AddRequest):
 # 搜索记忆
 @app.post("/search", response_model=SearchResponse)
 def search_memory(req: SearchRequest):
+    # 打印日志
+    print(f"search_memory: user_id={req.user_id} query={req.query} top_k={req.top_k}")
     results = store.search(
         query=req.query,
         
