@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """服务侧日志：只负责格式与落盘，不参与检索/存储逻辑。
 
-一行一个事件，字段用 key=value，方便评测失败后直接 grep。
+一行一个事件，开头是 [启动] / [请求] / [写入记忆] / [检索记忆] / [参数校验失败] /
+[未处理异常] 这样的中文标签，评测失败后按标签 grep。
 长正文一律截断：一次 top_k=100 的完整结果有好几 MB，全量打印会把有用行
 挤出轮转，所以这里只记规模（字符数、条数、分数区间）。
 """
@@ -45,7 +46,7 @@ def get_logger(store_dir) -> logging.Logger:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     except OSError as exc:  # noqa: BLE001
-        logger.warning("event=boot_file_log_disabled path=%s err=%s",
+        logger.warning("[启动] 日志文件写不进去，只输出到控制台：目录=%s 原因=%s",
                        store_dir, exc)
     return logger
 

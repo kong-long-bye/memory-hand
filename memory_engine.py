@@ -55,7 +55,7 @@ def memory_id(content: str) -> str:
 # ---------------------------------------------------------------------------
 CHUNK_SIZE = 4000               # 长文本切块目标大小（按行边界断，不切碎一行）
 CHUNK_INDEX_TRIGGER = 20000     # 短于该长度的记忆整段进索引，与切块视图等价
-NEIGHBOR_CHUNKS = 3             # 命中块前后各带几块（Memoria 的邻近平滑）
+NEIGHBOR_CHUNKS = 2             # 命中块前后各带几块（Memoria 的邻近平滑）
 TAIL_CHUNKS = 2                 # 尾部保底进入返回的块数（方案段在最后 1~4KB）
 MAX_HIT_CHUNKS = 2              # 一条记忆最多带几个命中块，防止一条巨型轨迹吃满预算
 MIN_HIT_CHARS = 12000           # 每条命中的预算下限：装得下命中块 + 尾部两块

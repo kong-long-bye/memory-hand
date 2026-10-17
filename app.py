@@ -4,7 +4,7 @@
 启动：
     uvicorn app:app --host 0.0.0.0 --port 7878
 
-每个请求在 data_store/service.log 留一行 key=value 事件（见 service_log），
+每个请求在 data_store/service.log 留一行中文事件提示（见 service_log），
 只记规模与 ID，不记记忆正文。
 """
 import sys
@@ -29,8 +29,8 @@ logger = get_logger(LOG_FILE.parent)
 
 _boot = store.stats()
 logger.info(
-    "event=boot version=%s python=%s store_path=%s total_memories=%s "
-    "total_chunks=%s total_users=%s log_file=%s",
+    "[启动] 服务版本=%s Python=%s 存储文件=%s 已加载记忆=%s 切块总数=%s "
+    "用户空间数=%s 日志文件=%s",
     app.version, sys.version.split()[0], _boot["store_path"],
     _boot["total_memories"], _boot["total_chunks"], _boot["total_users"],
     LOG_FILE)
@@ -83,12 +83,12 @@ async def log_request(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception as exc:  # noqa: BLE001
-        # 只标记入口，traceback 由 error_500 记一次，避免重复
-        logger.error("event=route method=%s path=%s client=%s exc=%s ms=%.1f",
+        # 只标记入口，完整 traceback 由 [未处理异常] 记一次，避免重复
+        logger.error("[请求异常] 方法=%s 路径=%s 来源=%s 异常类型=%s 耗时=%.1fms",
                      request.method, request.url.path, client,
                      type(exc).__name__, (time.perf_counter() - t0) * 1000)
         raise
-    logger.info("event=route method=%s path=%s client=%s status=%s ms=%.1f",
+    logger.info("[请求] 方法=%s 路径=%s 来源=%s 状态码=%s 耗时=%.1fms",
                 request.method, request.url.path, client, response.status_code,
                 (time.perf_counter() - t0) * 1000)
     return response
@@ -109,10 +109,10 @@ def add_memory(req: AddRequest):
         user_id=req.user_id,
         session_id=req.session_id,
     )
-    # 下面两个字典只读取用于诊断，不参与检索
+    # _by_user 只读取用于诊断，不参与检索
     logger.info(
-        "event=add request_id=%s user_id=%s session_id=%s msgs=%s content_chars=%s "
-        "written=%s user_pool=%s ms=%.1f",
+        "[写入记忆] 请求ID=%s 用户ID=%s 会话ID=%s 消息条数=%s 正文字符=%s "
+        "是否新写入=%s 该用户现有记忆=%s 耗时=%.1fms",
         req.request_id, req.user_id, req.session_id, len(req.messages),
         sum(len(m.content) for m in req.messages), written,
         len(store._by_user.get(req.user_id, ())),
@@ -139,9 +139,9 @@ def search_memory(req: SearchRequest):
     )
     scores = [r["score"] for r in results if r["score"] is not None]
     logger.info(
-        "event=search user_id=%s user_pool=%s top_k=%s query_chars=%s "
-        "query=\"%s\" cold_index=%s hits=%s resp_chars=%s score_hi=%s "
-        "score_lo=%s ms=%.1f",
+        "[检索记忆] 用户ID=%s 该用户现有记忆=%s top_k=%s 查询字符=%s "
+        "查询=\"%s\" 是否现建索引=%s 命中条数=%s 返回字符=%s "
+        "最高分=%s 最低分=%s 耗时=%.1fms",
         req.user_id, user_pool, req.top_k, len(req.query), brief(req.query),
         cold_index, len(results),
         sum(len(str(r["content"])) for r in results),
@@ -160,8 +160,8 @@ async def log_validation_error(request: Request,
         body = (await request.body())[:2000].decode("utf-8", "replace")
     except Exception:  # noqa: BLE001
         pass  # 读不到 body 也要留下拒绝记录
-    logger.error("event=reject_422 method=%s path=%s errors=%s body=\"%s\"",
-                 request.method, request.url.path,
+    logger.error("[参数校验失败] 状态码=%s 方法=%s 路径=%s 校验错误=%s 请求体=\"%s\"",
+                 exc.status_code, request.method, request.url.path,
                  brief(jsonable_encoder(exc.errors()), 500), brief(body, 500))
     # 与 FastAPI 默认响应保持一致，只加日志
     return JSONResponse(status_code=exc.status_code,
@@ -170,7 +170,7 @@ async def log_validation_error(request: Request,
 
 @app.exception_handler(Exception)
 def log_unhandled_error(request: Request, exc: Exception):
-    logger.exception("event=error_500 method=%s path=%s err=%s",
+    logger.exception("[未处理异常] 方法=%s 路径=%s 异常=%s",
                      request.method, request.url.path, exc)
     # Starlette 默认未捕获异常就是这句纯文本，保持不变
     return PlainTextResponse("Internal Server Error", status_code=500)
