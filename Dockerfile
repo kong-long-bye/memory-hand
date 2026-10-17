@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir jieba
 
 # 再拷贝源码
-COPY app.py memory_engine.py dataset_adapter.py evaluate.py llm_clinet.py ./
+COPY app.py service_log.py memory_engine.py dataset_adapter.py evaluate.py llm_clinet.py ./
 
 # data_store 挂卷；容器内保留目录
 RUN mkdir -p /app/data_store
