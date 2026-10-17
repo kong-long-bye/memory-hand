@@ -60,7 +60,7 @@ NEIGHBOR_CHUNKS = 2             # 命中块前后各带几块（Memoria 的邻�
 TAIL_CHUNKS = 2                 # 尾部保底进入返回的块数（方案段在最后 1~4KB）
 MAX_HIT_CHUNKS = 2              # 一条记忆最多带几个命中块，防止一条巨型轨迹吃满预算
 MIN_HIT_CHARS = 12000           # 每条命中的预算下限：装得下命中块 + 尾部两块
-MAX_RESPONSE_CHARS = 60000      # 单次 /search 软预算，按条分摊；条数多时由下限兜住
+MAX_RESPONSE_CHARS = 60000      # 单次 /search 软预算，按条分摊；条数多时由下限兜住 60k
 
 
 def _chunk_ranges(text: str) -> list:
@@ -252,7 +252,7 @@ class MemoryStore:
                             key=lambda kv: kv[1]["score"], reverse=True)[:top_k]
             # 预算按返回条数分摊（每条有下限），只砍块、不丢整条命中，
             # 也绝不把 top_k 静默砍短——历史上这么做过，recall@10 当场掉 0.08
-            cap = max(MIN_HIT_CHARS, MAX_RESPONSE_CHARS // max(len(ranked), 1))
+            cap = max(MIN_HIT_CHARS, MAX_RESPONSE_CHARS // max(len(ranked), 1)) # 这里可能直接超过128k
             results = []
             for mi, g in ranked:
                 text = docs[mi]["content"]
