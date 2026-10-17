@@ -17,7 +17,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent # 仓库根
 DATA_DIR = BASE_DIR / "data" / "SWEContextBench" / "data"
 
 SPLITS = {

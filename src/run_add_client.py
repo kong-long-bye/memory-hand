@@ -4,8 +4,8 @@
 每个 condition 写进各自的全局 user_id 空间，跨任务共享，这是该数据集的考点所在。
 request_id 带 run_id + 经验 ID，重复执行由服务端幂等跳过。
 
-用法：
-    python run_add_client.py --split lite --run-id local
+用法（在仓库根执行）：
+    python src/run_add_client.py --split lite --run-id local
 """
 import argparse
 import sys

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Memory Service：FastAPI 实现官方 /health /add /search 三个接口。
 
-启动：
-    uvicorn app:app --host 0.0.0.0 --port 7878
+启动（在仓库根执行）：
+    uvicorn app:app --app-dir src --host 0.0.0.0 --port 7878
 
 每个请求在 data_store/service.log 留一行中文事件提示（见 service_log），
 只记规模与 ID，不记记忆正文。

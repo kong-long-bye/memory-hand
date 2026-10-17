@@ -21,20 +21,30 @@
 
 ```
 memory-hand/
-├── app.py                # FastAPI 服务：/health  /add  /search
-├── memory_engine.py      # JSONL 持久化 + BM25 检索 + 中英混合分词
-├── dataset_adapter.py    # 本地数据集接入（评测用）
-├── evaluate.py           # 本地评测脚本（Smoke 前的自测）
-├── llm_clinet.py         # LLM 摘要客户端（Day 2 Memory Schema 用）
+├── src/                    # 全部 Python 代码
+│   ├── app.py              # FastAPI 服务：/health  /add  /search
+│   ├── memory_engine.py    # JSONL 持久化 + BM25 检索 + 中英混合分词
+│   ├── service_log.py      # 服务日志（stdout + data_store/service.log 双写）
+│   ├── dataset_adapter.py  # 本地数据集接入（评测用）
+│   ├── evaluate.py         # 本地评测脚本（Smoke 前的自测）
+│   ├── run_add_client.py   # 把经验池批量 /add 进服务
+│   ├── llm_clinet.py       # LLM 摘要客户端（Day 2 Memory Schema 用）
+│   └── download_dataset.py # 拉取 SWEContextBench 到 data/
 ├── requirements.txt
-├── .env                  # API Key（已 gitignore，不提交）
-├── Dockerfile            # 生产镜像
-├── docker-compose.yml    # 服务器侧 compose（与镜像包一起上传）
-├── deploy.sh             # 服务器一键部署脚本
-├── dist/                 # docker save 产物（.gitignore已忽略）
-├── data_store/           # 运行时持久化目录（挂载卷）
-└── PLAN_10_DAYS.md       # 10 天优化路线图
+├── .env                    # API Key（已 gitignore，不提交）
+├── Dockerfile              # 生产镜像
+├── docker-compose.yml      # 服务器侧 compose（与镜像包一起上传）
+├── deploy.sh               # 服务器一键部署脚本
+├── dist/                   # docker save 产物（.gitignore已忽略）
+├── data/                   # 数据集（已 gitignore）
+├── data_store/             # 运行时持久化目录（挂载卷）
+├── reports/                # 评测产物（已 gitignore）
+└── PLAN_10_DAYS.md         # 10 天优化路线图
 ```
+
+代码目录不是包：模块之间用平铺导入（`from memory_engine import ...`），
+所以启动/评测要么带上 `--app-dir src`，要么直接 `python src/xxx.py`（脚本所在目录会自动进 `sys.path`）。
+数据目录固定在仓库根（`data/`、`data_store/`、`reports/`），由 `memory_engine.PROJECT_ROOT` 统一解析。
 
 ---
 
@@ -44,16 +54,16 @@ memory-hand/
 # 1) 安装依赖
 pip install -r requirements.txt
 
-# 2) 启动服务（默认 7878 端口，与服务器保持一致）
-uvicorn app:app --host 0.0.0.0 --port 7878
+# 2) 启动服务（默认 7878 端口，与服务器保持一致；在仓库根执行）
+uvicorn app:app --app-dir src --host 0.0.0.0 --port 7878
 
 # 3) 冒烟自检
 curl http://127.0.0.1:7878/health
 # -> {"status":"ok"}
 
-# 4) 导入数据 + 本地评测（需先建一个 run_add_client 或直接用 dataset_adapter 内置的 build_add_requests）
-python dataset_adapter.py          # 打印数据集摘要
-python evaluate.py                 # 默认跑 validation.jsonl，输出 Recall@5/10、MRR、nDCG@10、Noise@10、HN-Rejection
+# 4) 导入数据 + 本地评测（在仓库根执行）
+python src/run_add_client.py --split lite --run-id local   # 写入经验池
+python src/evaluate.py --split lite --run-id local         # 逐任务 /search 算指标
 ```
 
 `.env` 关键项（`LLM_MODE` 即模型名；未填或填 `none` 时 `summarize()` 直接抛 `RuntimeError`，不再有离线回退）：

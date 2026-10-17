@@ -22,8 +22,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir jieba
 
-# 再拷贝源码
-COPY app.py service_log.py memory_engine.py dataset_adapter.py evaluate.py llm_clinet.py ./
+# 再拷贝源码（src/ 下是全部 Python 模块）
+COPY src/ ./src/
 
 # data_store 挂卷；容器内保留目录
 RUN mkdir -p /app/data_store
@@ -32,4 +32,5 @@ EXPOSE 7878
 
 # 生产启动：单 worker 保证 BM25 索引 + 幂等 set 只在同一进程内共享；
 # 如需横向扩展，先把 MemoryStore 换成 Redis/DB 后端再调 workers>1
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7878", "--workers", "1"]
+# --app-dir src 让 uvicorn 从 /app/src 导入模块，数据目录仍是 /app
+CMD ["uvicorn", "app:app", "--app-dir", "src", "--host", "0.0.0.0", "--port", "7878", "--workers", "1"]

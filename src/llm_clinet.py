@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-_ROOT = Path(__file__).parent
+_ROOT = Path(__file__).resolve().parent.parent # 仓库根，.env 在这一层
 _ENV_LOADED = False
 _CACHE = {}  # text -> summary，数据集中有重复文本，缓存可省调用
 

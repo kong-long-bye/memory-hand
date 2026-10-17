@@ -10,9 +10,9 @@
 gold 标签来自 Relationship 表；hard negative 数据集无官方标注，
 用「同仓库且非 gold」近似，只影响 hn_rejection 一项。
 
-用法：
-    python run_add_client.py --split lite --run-id local
-    python evaluate.py --split lite --run-id local
+用法（在仓库根执行）：
+    python src/run_add_client.py --split lite --run-id local
+    python src/evaluate.py --split lite --run-id local
 """
 import argparse
 import json
@@ -25,9 +25,9 @@ from pathlib import Path
 import requests
 
 import dataset_adapter as da
-from memory_engine import memory_id
+from memory_engine import PROJECT_ROOT, memory_id
 
-REPORT_DIR = Path(__file__).parent / "reports"
+REPORT_DIR = PROJECT_ROOT / "reports"
 
 K_LIST = (1, 3, 5, 10)
 
@@ -167,7 +167,7 @@ def main():
                                        timeout=5).json())
     except Exception as exc:  # noqa: BLE001
         print(f"cannot reach memory service at {args.base_url}: {exc}\n"
-              f"先启动：uvicorn app:app --host 0.0.0.0 --port 7878", file=sys.stderr)
+              f"先启动：uvicorn app:app --app-dir src --host 0.0.0.0 --port 7878", file=sys.stderr)
         sys.exit(1)
 
     samples, pool = da.load_split(args.split)

@@ -122,15 +122,15 @@ V0 做成这样才算完成：
 
 ```bash
 export MEMORY_STORE_PATH=data_store/experiments/v0_bm25/memory.jsonl
-envs/memory/python -m uvicorn app:app --host 127.0.0.1 --port 7878
+envs/memory/python -m uvicorn app:app --app-dir src --host 127.0.0.1 --port 7878
 ```
 
 另开终端：
 
 ```bash
-envs/memory/python run_add_client.py --split lite --run-id v0_bm25
-envs/memory/python verify_store.py --split lite --run-id v0_bm25 --expected-relevant 71 --expected-noisy 300
-envs/memory/python evaluate.py --split lite --run-id v0_bm25 --top-k 10 --out reports/v0_bm25_lite.json
+envs/memory/python src/run_add_client.py --split lite --run-id v0_bm25
+envs/memory/python src/verify_store.py --split lite --run-id v0_bm25 --expected-relevant 71 --expected-noisy 300
+envs/memory/python src/evaluate.py --split lite --run-id v0_bm25 --top-k 10 --out reports/v0_bm25_lite.json
 ```
 
 完成后报告必须显示：
@@ -361,7 +361,7 @@ V6 做成这样才算完成：
    - 超限时返回明确错误，不能静默截断。
 5. 部署检查：
    - compose、Dockerfile、git tag、镜像 tar 版本统一。
-   - 镜像必须包含 `run_add_client.py`、`dataset_adapter.py`、`download_dataset.py`，或至少提供可复现导入入口。
+   - 镜像必须包含 `src/run_add_client.py`、`src/dataset_adapter.py`、`src/download_dataset.py`，或至少提供可复现导入入口。
    - Dense/FAISS 若进入主链路，模型和索引体积必须离线打包或挂载持久化目录。
 
 V7 做成这样才算完成：

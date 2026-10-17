@@ -5,13 +5,13 @@
 仓库是一组 parquet（Related / Experience / Relationship 及各自 Lite 变体），
 每个 schema 不同，因此按文件分别导出 JSONL，供 dataset_adapter 使用。
 
-运行： D:/environment/miniconda/envs/memory/python download_dataset.py
+运行： D:/environment/miniconda/envs/memory/python src/download_dataset.py
 """
 import json
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent # 仓库根
 DATA_DIR = BASE_DIR / "data"
 LOCAL_DIR = DATA_DIR / "SWEContextBench"
 

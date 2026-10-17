@@ -33,7 +33,8 @@ from rank_bm25 import BM25Okapi
 
 
 jieba.setLogLevel(40)
-STORE_DIR = Path(__file__).parent / "data_store" # 数据存储目录
+PROJECT_ROOT = Path(__file__).resolve().parent.parent # 仓库根（容器内 /app）
+STORE_DIR = PROJECT_ROOT / "data_store" # 数据存储目录
 STORE_PATH = STORE_DIR / "memory.jsonl" # 持久化存储路径
 
 
