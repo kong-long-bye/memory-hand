@@ -5,10 +5,14 @@
     uvicorn app:app --app-dir src --host 0.0.0.0 --port 7878
 
 每个请求在 data_store/service.log 留一行中文事件提示（见 service_log），
-只记规模与 ID，不记记忆正文。
+只记规模与 ID，不记记忆正文；官方 /add、/search 的完整请求体另存
+data_store/official_requests.jsonl，供本地回放。
 """
+import json
 import sys
+import threading
 import time
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -27,6 +31,32 @@ store = MemoryStore() # 存储结构
 # 固定 data_store/service.log，不跟随按版本划分的存储子目录
 LOG_FILE = PROJECT_ROOT / "data_store" / "service.log"
 logger = get_logger(LOG_FILE.parent)
+
+# 官方 /add、/search 原始请求逐条落盘，供本地回放；一行一个请求，正文不截断
+REQUEST_LOG_FILE = PROJECT_ROOT / "data_store" / "official_requests.jsonl"
+_request_log_lock = threading.Lock()
+
+
+def _record_official_request(path: str, body: dict, request: Request) -> None:
+    """把通过校验的请求体追加到 JSONL；记录失败不能影响主流程。"""
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "path": path,
+        "client": request.client.host if request.client else "-",
+        "user_agent": request.headers.get("user-agent", ""),
+        "body": body,
+    }
+    try:
+        line = json.dumps(record, ensure_ascii=False,
+                          separators=(",", ":")) + "\n"
+        with _request_log_lock:
+            REQUEST_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(REQUEST_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[请求记录失败] 路径=%s 异常类型=%s", path,
+                     type(exc).__name__)
+
 
 _boot = store.stats()
 logger.info(
@@ -102,8 +132,10 @@ def health():
 
 # 添加记忆
 @app.post("/add", response_model=AddResponse)
-def add_memory(req: AddRequest):
+def add_memory(req: AddRequest, request: Request):
     t0 = time.perf_counter()
+    _record_official_request("/add", req.model_dump(exclude_none=True),
+                             request)
     written = store.add(
         request_id=req.request_id,
         messages=[m.model_dump(exclude_none=True) for m in req.messages],# 将模型对象转换为字典，并排除 None 值
@@ -127,8 +159,10 @@ def add_memory(req: AddRequest):
 
 # 搜索记忆
 @app.post("/search", response_model=SearchResponse)
-def search_memory(req: SearchRequest):
+def search_memory(req: SearchRequest, request: Request):
     t0 = time.perf_counter()
+    _record_official_request("/search", req.model_dump(exclude_none=True),
+                             request)
     # 下面两个字典只读取用于诊断：调用前没有该 user 的索引，本次就会现建
     user_pool = len(store._by_user.get(req.user_id, ()))
     cold_index = user_pool > 0 and req.user_id not in store._index_by_user

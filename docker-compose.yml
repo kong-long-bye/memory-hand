@@ -2,7 +2,7 @@
 # 使用：docker compose up -d
 services:
   memory-hand:
-    image: memory-hand:v1.0
+    image: memory-hand:v1.1
     container_name: memory-hand
     ports:
       - "7878:7878"

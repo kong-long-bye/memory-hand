@@ -38,6 +38,7 @@ memory-hand/
 ├── dist/                   # docker save 产物（.gitignore已忽略）
 ├── data/                   # 数据集（已 gitignore）
 ├── data_store/             # 运行时持久化目录（挂载卷）
+│   └── official_requests.jsonl  # 官方 /add、/search 原始请求，供本地回放
 ├── reports/                # 评测产物（已 gitignore）
 └── PLAN_10_DAYS.md         # 10 天优化路线图
 ```
