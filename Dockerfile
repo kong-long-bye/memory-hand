@@ -1,6 +1,6 @@
 # Memory Hand — 生产镜像
-# 本地构建：docker build -t memory-hand:v0.1.1 .
-# 导出离线包：docker save -o dist/memory-hand-v0.1.1.tar memory-hand:v0.1.1
+# 本地构建：docker build -t memory-hand:v1.1.0 .
+# 导出离线包：docker save -o dist/memory-hand-v1.1.0.tar memory-hand:v1.1.0
 
 FROM python:3.12-slim
 

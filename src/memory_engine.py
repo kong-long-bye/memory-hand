@@ -1,28 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Memory Engine V1：JSONL 持久化存储 + BM25 检索。
+"""Memory Engine V1.1：结构化 Parent Memory + message 级 BM25。
 
-对应 Day 1 Task 4（Memory Storage）与 Task 3（Search 第一版：BM25 Retrieval）。
-
-存储格式（data_store/memory.jsonl，每行一条记忆）::
+存储（data_store/v1.1/memory.jsonl，每行一次 Add）::
 
     {
         "id": "mem_3a1f9c2b7d10",
-        "user_id": "task-0001:noisy:local",
-        "session_id": "eval:local:sample:task-0001:noisy",
-        "request_id": "eval:local:coding:...:chunk-000",
-        "content": "memory text",
+        "user_id": "...",
+        "session_id": "...",
+        "request_id": "...",
+        "messages": [
+            {"role": "user", "content": "原始消息", "timestamp": 1759032000000},
+            {"role": "assistant", "content": "原始回复"}
+        ],
         "timestamp": 1759032000000,
-        "created_at": "2026-09-28T12:00:00Z"
+        "created_at": "2026-10-17T00:00:00Z"
     }
 
-检索：按 user_id 隔离构建 BM25 索引（rank_bm25），懒加载 + 写入后失效。
-短记忆整段索引、整段返回；超过 CHUNK_INDEX_TRIGGER 的记忆按块索引，返回时拼
-"命中块 + 邻居块 + 尾部方案段"的证据视图，原始全文仍完整存在 JSONL 里。
+检索单位是 message：普通消息整条进 BM25；超过 CHUNK_INDEX_TRIGGER 的消息只在
+它自己内部切块，绝不跨消息边界。unit 分数按 Parent 取最大值聚合，每个 Parent
+只返回一次，content 是最高分 unit 的原文并带 [role] 标签。
+所有返回 content 共享 MAX_RESPONSE_CONTENT_CHARS 硬预算，放不下的候选跳过；
+data 长度不超过 top_k，没有任何词面证据时返回空列表。
+
+V1.0 的 data_store/memory.jsonl 已把 messages 拼平成 content，role 与消息边界
+不可恢复；本版不读取旧格式，旧文件保留作 V1.0 回滚与基线。
 """
 
 import json
 import hashlib
-import math
 import re
 import threading
 from datetime import datetime, timezone
@@ -35,36 +40,37 @@ from rank_bm25 import BM25Okapi
 jieba.setLogLevel(40)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent # 仓库根（容器内 /app）
 STORE_DIR = PROJECT_ROOT / "data_store" # 数据存储目录
-STORE_PATH = STORE_DIR / "memory.jsonl" # 持久化存储路径
+STORE_PATH = STORE_DIR / "v1.1" / "memory.jsonl" # 结构化存储，与 V1.0 文件隔离
+
+CHUNK_SIZE = 4000                # 超长消息内部的块目标大小（按行边界断，不切碎一行）
+CHUNK_INDEX_TRIGGER = 20000      # 不超过该长度的 message 整条作为一个检索单元
+MAX_RESPONSE_CONTENT_CHARS = 60000  # 单次 /search 所有 content 的硬预算（含角色标签）
 
 
 def memory_id(content: str) -> str:
     """内容寻址 ID：同一份原文在任何 user_id 下都得到同一个 id。
 
-    /search 命中项靠它映射回来源记录（评测、去重、后续分块视图都依赖这个可追溯性），
+    /search 命中项靠它映射回来源记录（评测、去重都依赖这个可追溯性），
     不再依赖"返回内容完全等于原文"。
     """
     return "mem_" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
 
 
-# ---------------------------------------------------------------------------
-# 证据视图（改进 1）：长轨迹切块索引 + 命中邻近平滑 + 尾部方案段保底 + 按块控制预算
-#
-# 平台送来的单条轨迹 5.6 万~40 万字符，"改法"只落在最后 1~4KB；整段原文回给平台
-# 解题模型会在答案侧预算里被截断，恰好砍掉尾部。故索引按块建，返回按块拼。
-# 原始全文始终整条存在 JSONL 里，这里只做视图，不删不改。
-# ---------------------------------------------------------------------------
-CHUNK_SIZE = 4000               # 长文本切块目标大小（按行边界断，不切碎一行）
-CHUNK_INDEX_TRIGGER = 20000     # 短于该长度的记忆整段进索引，与切块视图等价
-NEIGHBOR_CHUNKS = 2             # 命中块前后各带几块（Memoria 的邻近平滑）
-TAIL_CHUNKS = 2                 # 尾部保底进入返回的块数（方案段在最后 1~4KB）
-MAX_HIT_CHUNKS = 2              # 一条记忆最多带几个命中块，防止一条巨型轨迹吃满预算
-MIN_HIT_CHARS = 12000           # 每条命中的预算下限：装得下命中块 + 尾部两块
-MAX_RESPONSE_CHARS = 60000      # 单次 /search 软预算，按条分摊；条数多时由下限兜住 60k
+def parent_id(messages: list) -> str:
+    """Parent Memory 的稳定 ID。
+
+    对所有消息的 (role, content) 序列取哈希，role 结构不同就不会被去重吞掉。
+    timestamp 不参与，重发同一对话仍命中同一 Parent。
+    """
+
+    payload = json.dumps(
+        [[m.get("role"), m.get("content")] for m in messages],
+        ensure_ascii=False, separators=(",", ":"))
+    return memory_id(payload)
 
 
 def _chunk_ranges(text: str) -> list:
-    """长文本切成 [(start, end), ...]，覆盖全文、不重叠、按原文顺序。"""
+    """单条消息内部切成 [(start, end), ...]；够短就整条一个 unit，绝不跨消息。"""
     total = len(text)
     if total <= CHUNK_INDEX_TRIGGER:
         return [(0, total)]
@@ -80,74 +86,42 @@ def _chunk_ranges(text: str) -> list:
     return ranges
 
 
-def _merge_ranges(ranges: list) -> list:
-    """合并相邻/重叠区间，返回按起点排序的不相交区间列表。"""
-    merged = []
-    for s, e in sorted(ranges):
-        if merged and s <= merged[-1][1]: # 合并区间
-            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-        else:
-            merged.append((s, e))
-    return merged
+def _normalize_messages(messages: list) -> list:
+    """只保留 role/content/timestamp，顺序原样保留。"""
+    normalized = []
+    for m in messages:
+        msg = {"role": m.get("role", ""), "content": m.get("content", "")}
+        if m.get("timestamp") is not None:
+            msg["timestamp"] = m["timestamp"]
+        normalized.append(msg)
+    return normalized
 
 
-def _pick_ranges(ranges: list, hit_chunks: list, cap: int) -> list:
-    """必带：最好的命中块 + 最后 TAIL_CHUNKS 块（方案段在尾部）。
-
-    必带块不受 cap 约束：预算不够宁可多回几 KB，也不能丢改法、丢命中或丢条数。
-    其余块（别的命中块、命中块的邻居）才在 cap 内追加。
-    """
-    last = len(ranges) - 1
-    hits = [ci for ci in hit_chunks if 0 <= ci <= last][:MAX_HIT_CHUNKS]
-
-    must = []
-    # 最好的命中块 + 最后 TAIL_CHUNKS 块
-    for ci in (hits[:1] + list(range(last, last - TAIL_CHUNKS, -1))):
-        if 0 <= ci <= last and ci not in must:
-            must.append(ci)
-    #其他命中块 + 邻居块，按分数排序，按 cap 追加
-    optional = [ci for ci in hits if ci not in must]
-    # 下面这种方法，分别遍历距离，主要是为了后面的预算控制
-    for ci in hits[:1]: # 取出第一个命中块一个
-        for off in range(1, NEIGHBOR_CHUNKS + 1):
-            for nb in (ci - off, ci + off):
-                if 0 <= nb <= last and nb not in must and nb not in optional:
-                    optional.append(nb)
-
-    chosen = list(must)
-    # 计算已选块的总字符数
-    used = sum(ranges[ci][1] - ranges[ci][0] for ci in must)
-    for ci in optional:
-        size = ranges[ci][1] - ranges[ci][0]
-        if used + size > cap:
-            continue
-        chosen.append(ci)
-        used += size
-    return _merge_ranges([ranges[ci] for ci in chosen])
+def _messages_timestamp(messages):
+    """一次 Add 里最新的事件时间戳（毫秒），Parent 只留一个值；没带时返回 None。"""
+    marks = [m.get("timestamp") for m in messages if m.get("timestamp") is not None]
+    return max(marks) if marks else None
 
 
-def _render_view(mid: str, text: str, spans: list) -> str:
-    """把选中的块拼成返回内容；整段命中时原样返回，部分命中时带可追溯标记。"""
-    total = len(text)
-    if len(spans) == 1 and spans[0] == (0, total):
-        return text
-    mark = "[memory={};spans={}/{}]".format(
-        mid, "+".join("{}-{}".format(s, e) for s, e in spans), total)
-    return mark + "\n" + "\n...\n".join(text[s:e] for s, e in spans)
+def _evidence(mem: dict, unit: tuple) -> str:
+    """把命中的 unit 渲染成返回内容：角色标签 + 原始片段。"""
+    msg_i, start, end, role = unit[1], unit[3], unit[4], unit[5]
+    text = mem["messages"][msg_i].get("content") or ""
+    return "[{}]\n{}".format(role or "unknown", text[start:end])
 
 
 # 存储结果
 class MemoryStore:
-    """MemoryStore：JSONL 持久化存储 + BM25 检索。"""
+    """MemoryStore：结构化 JSONL 持久化 + message 级 BM25。"""
 
     def __init__(self, path: Path = STORE_PATH):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock() # 互斥锁
-        self._memories = []  # 全量记忆列表
-        self._by_user = {}  # user_id -> [memory, ...]
-        self._ids_by_user = {}  # user_id -> {memory_id, ...} 同一 user 内同内容去重
-        self._index_by_user = {}  # user_id -> (bm25, docs) # 懒加载，真正需要时才构建
+        self._memories = []  # 全量 Parent 列表
+        self._by_user = {}  # user_id -> [Parent, ...]
+        self._ids_by_user = {}  # user_id -> {parent_id, ...} 同一 user 内去重
+        self._index_by_user = {}  # user_id -> (bm25, units, tokens) 懒加载
         self._request_ids = set()  # 幂等：request_id 去重
         self._load() # 加载现有数据
 
@@ -155,38 +129,42 @@ class MemoryStore:
     def _load(self):
         if not self.path.exists():
             return
-        # 读取 JSONL 文件，按行解析为 memory 对象
         with open(self.path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 mem = json.loads(line)
+                if not isinstance(mem.get("messages"), list):
+                    raise ValueError(
+                        "存储文件是 V1.0 平铺格式（没有 messages），V1.1 无法恢复 "
+                        f"role 与消息边界，请换用新的存储文件：{self.path}")
                 self._request_ids.add(mem.get("request_id"))
-                mid = memory_id(mem["content"])
-                mem["id"] = mid  # id 由内容决定：历史 uuid id 载入即归一，无需重新写入
+                mid = parent_id(mem["messages"])
+                mem["id"] = mid  # id 由结构决定：载入时归一，旧记录也能对上
                 ids = self._ids_by_user.setdefault(mem["user_id"], set())
-                if mid not in ids:  # 同一 user 内同内容的历史重复行，载入时就不再进索引
+                if mid not in ids:  # 同一 user 内的历史重复行，载入时就不再进索引
                     ids.add(mid)
                     self._memories.append(mem)
                     self._by_user.setdefault(mem["user_id"], []).append(mem)
-    # 将文件写入到磁盘
+
     def _append_file(self, mem: dict):
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(mem, ensure_ascii=False) + "\n") # 中文也可以写入
+
     # 写入
     def add(self, request_id: str, messages: list, user_id: str,
             session_id: str) -> bool:
-        """写入一批 messages；request_id 重复时幂等跳过。返回是否新写入。
+        """写入一次 Add（一个 Parent Memory）；request_id 重复时幂等跳过。
 
-        同一 user 内同内容（换了 request_id 重发）也不重复入库：
-        重复项会白占 Top-K 名额并稀释自身关键词的 IDF。
+        同一 user 内相同 Parent（role + 原文序列一致）也不重复入库：重复项会
+        白占 Top-K 名额并稀释自身关键词的 IDF。
         """
         with self._lock:
             if request_id and request_id in self._request_ids:
                 return False
-            content = _messages_to_text(messages)
-            mid = memory_id(content)
+            normalized = _normalize_messages(messages) # 只保留 role/content/timestamp
+            mid = parent_id(normalized)
             if mid in self._ids_by_user.get(user_id, ()):
                 if request_id:
                     self._request_ids.add(request_id)  # 幂等：request_id 去重
@@ -196,8 +174,8 @@ class MemoryStore:
                 "user_id": user_id,
                 "session_id": session_id,
                 "request_id": request_id,
-                "content": content,
-                "timestamp": _messages_timestamp(messages),
+                "messages": normalized,
+                "timestamp": _messages_timestamp(normalized),
                 "created_at": datetime.now(timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"),
             }
@@ -205,80 +183,94 @@ class MemoryStore:
             self._memories.append(mem)
             self._by_user.setdefault(user_id, []).append(mem)
             self._ids_by_user.setdefault(user_id, set()).add(mid)
-            self._index_by_user.pop(user_id, None)  # 索引失效，为了懒加载、
+            self._index_by_user.pop(user_id, None)  # 写入后索引失效，下次检索重建
             if request_id:
                 self._request_ids.add(request_id) # 幂等：request_id 去重
             return True
 
     # 获取索引
     def _get_index(self, user_id: str):
-        """返回 (bm25, corpus)。corpus 与 BM25 文档一一对应：(记忆下标, 块下标)。
+        """返回 (bm25, units, token_sets)，三者按下标一一对应。
 
-        长记忆按块进索引，所以语料条目比记忆多；返回时必须按记忆下标聚合，
-        不能把语料条目当成记忆。
+        units 元素为 (记忆下标, 消息下标, 块下标, start, end, role)。
+        token_sets 在索引期建好，查询时只做集合交集，不重复构造。
+        长消息内部切块后，同一 Parent 会对应多个 unit；返回时必须按记忆下标聚合，
+        不能把 unit 当成一条记忆。
         """
         cached = self._index_by_user.get(user_id) # 获取缓存的索引
         if cached is None:
-            docs = self._by_user.get(user_id, []) # 获取记忆
-            corpus, tokens_docs = [], []
-            for mi, d in enumerate(docs):
-                for ci, (s, e) in enumerate(_chunk_ranges(d["content"])): # ci是块下标，s,e是块的起止位置，_chunk_ranges返回的是一个列表，里面是每个块的起止位置
-                    corpus.append((mi, ci))
-                    tokens_docs.append(tokenize(d["content"][s:e])) # 对每个块进行分词，得到一个二维列表，里面是每个块的分词结果
-            cached = (BM25Okapi(tokens_docs), corpus) # 创建 BM25 索引，返回索引和语料
+            docs = self._by_user.get(user_id, []) # 获取 Parent
+            units, tokens = [], []
+            for mi, mem in enumerate(docs):
+                for msg_i, msg in enumerate(mem["messages"]):
+                    text = msg.get("content") or ""
+                    for ci, (s, e) in enumerate(_chunk_ranges(text)):
+                        toks = tokenize(text[s:e])
+                        if not toks:  # 空消息不产生检索单元
+                            continue
+                        units.append((mi, msg_i, ci, s, e, msg.get("role") or ""))
+                        tokens.append(toks)
+            bm25 = BM25Okapi(tokens) if tokens else None
+            cached = (bm25, units, [set(t) for t in tokens])
             self._index_by_user[user_id] = cached
         return cached
 
     # 检索
     def search(self, user_id: str, query: str, top_k: int = 5) -> list:
+        """按 Parent 返回 <= top_k 条命中，content 受全局字符预算约束。"""
+        if top_k <= 0:
+            return []
+        query_tokens = tokenize(query or "")
+        if not query_tokens:  # 没切出 token 时 BM25 没有意义，直接返回空
+            return []
         with self._lock:
             docs = self._by_user.get(user_id, [])
             if not docs:
                 return []
-            bm25, corpus = self._get_index(user_id) # 获取索引，bm25和(记忆,块)语料
-            #计算分数（块级）
-            scores = bm25.get_scores(tokenize(query))
-            # 块 -> 记忆：一条记忆取其最好块的分数，命中块按分数从高到低记序
-            grouped = {}
-            # 将块级分数聚合到记忆级别，取每条记忆的最高分数，并记录命中块的下标
-            for k, s in enumerate(scores):
-                mi, ci = corpus[k] # mi是记忆下标，ci是块下标
-                s = float(s)
-                g = grouped.setdefault(mi, {"score": float("-inf"), "hits": []})
-                g["score"] = max(g["score"], s)
-                g["hits"].append((s, ci))
-            # 记忆级排序，返回前 top_k 条记忆（条数语义不变：仍是 <= top_k 条记忆）
-            ranked = sorted(grouped.items(),
-                            key=lambda kv: kv[1]["score"], reverse=True)[:top_k]
-            # 预算按返回条数分摊（每条有下限），只砍块、不丢整条命中，
-            # 也绝不把 top_k 静默砍短——历史上这么做过，recall@10 当场掉 0.08
-            cap = max(MIN_HIT_CHARS, MAX_RESPONSE_CHARS // max(len(ranked), 1)) # 这里可能直接超过128k
-            results = []
-            for mi, g in ranked:
-                text = docs[mi]["content"]
-                ranges = _chunk_ranges(text)
-                if len(ranges) == 1:
-                    content = text
-                else:
-                    # 多块命中时，按分数排序，取前 cap 个字符
-                    hits = [ci for _s, ci in
-                            sorted(g["hits"], key=lambda x: x[0], reverse=True)] # 按分数排序命中块的下标
-                    content = _render_view(docs[mi]["id"], text,
-                                           _pick_ranges(ranges, hits, cap))
+            bm25, units, token_sets = self._get_index(user_id)
+            if bm25 is None:
+                return []
+            scores = bm25.get_scores(query_tokens)
+            query_set = set(query_tokens)
+
+            # unit -> Parent：取该 Parent 的最高分 unit，命中 unit 只保留有词面证据的。
+            # 不用 score <= 0 当相关性门槛：负 IDF 下正相关也可能得负分。
+            best = {}
+            for unit, unit_set, score in zip(units, token_sets, scores):
+                if not (query_set & unit_set):
+                    continue
+                mi = unit[0]
+                prev = best.get(mi)
+                if prev is None or score > prev[0]:
+                    best[mi] = (float(score), unit)
+
+            ranked = sorted(best.items(),
+                            key=lambda kv: kv[1][0], reverse=True)
+            # 全局预算按排名顺序花：放不下的候选跳过并继续看后面的，
+            # 但保留项始终按相关性降序，data 长度不超过 top_k
+            results, remaining = [], MAX_RESPONSE_CONTENT_CHARS
+            for mi, (score, unit) in ranked:
+                if len(results) >= top_k:
+                    break
+                content = _evidence(docs[mi], unit)
+                if len(content) > remaining:
+                    continue
                 results.append({
                     "id": docs[mi]["id"],
                     "content": content,
-                    "score": g["score"],
+                    "score": score,
                     "created_at": docs[mi].get("created_at"),
                 })
+                remaining -= len(content)
             return results
 
     # 运维统计
     def stats(self) -> dict:
         return {
             "total_memories": len(self._memories),
-            "total_chunks": sum(len(_chunk_ranges(m["content"]))
-                                for m in self._memories),
+            "total_units": sum(len(_chunk_ranges(m.get("content") or ""))
+                               for mem in self._memories
+                               for m in mem["messages"]),
             "total_users": len(self._by_user),
             "store_path": str(self.path),
         }
@@ -294,20 +286,6 @@ class MemoryStore:
             if self.path.exists():
                 self.path.unlink()
 
-
-
-
-def _messages_to_text(messages) -> str:
-    return "\n".join(m["content"] for m in messages)
-
-
-def _messages_timestamp(messages):
-    """一批 messages 里最新的事件时间戳（毫秒），一条记忆只留一个值。
-
-    平台带 timestamp 才有可靠的顺序信号（跨记录邻近平滑要用）；没带时返回 None。
-    """
-    marks = [m.get("timestamp") for m in messages if m.get("timestamp") is not None]
-    return max(marks) if marks else None
 
 # ---------------------------------------------------------------------------
 # Tokenizer（中英混合）：ASCII 标识符拆 snake_case/camelCase；中文用 jieba，缺包回退字符级

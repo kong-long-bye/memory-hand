@@ -16,23 +16,24 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from memory_engine import MemoryStore
+from memory_engine import MemoryStore, PROJECT_ROOT
 from service_log import brief, get_logger
 
 
-app = FastAPI(title="Agent Memory Service", version="0.1.0")
+app = FastAPI(title="Agent Memory Service", version="1.1.0")
 store = MemoryStore() # 存储结构
 
-# 日志落在挂载卷里，容器重启和 docker logs 轮转之后仍然可读
-LOG_FILE = store.path.parent / "service.log"
+# 日志落在挂载卷里，容器重启和 docker logs 轮转之后仍然可读；
+# 固定 data_store/service.log，不跟随按版本划分的存储子目录
+LOG_FILE = PROJECT_ROOT / "data_store" / "service.log"
 logger = get_logger(LOG_FILE.parent)
 
 _boot = store.stats()
 logger.info(
-    "[启动] 服务版本=%s Python=%s 存储文件=%s 已加载记忆=%s 切块总数=%s "
+    "[启动] 服务版本=%s Python=%s 存储文件=%s 已加载记忆=%s 检索单元总数=%s "
     "用户空间数=%s 日志文件=%s",
     app.version, sys.version.split()[0], _boot["store_path"],
-    _boot["total_memories"], _boot["total_chunks"], _boot["total_users"],
+    _boot["total_memories"], _boot["total_units"], _boot["total_users"],
     LOG_FILE)
 
 # api数据模型，和官方的保持一直

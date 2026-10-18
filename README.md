@@ -246,14 +246,15 @@ firewall-cmd --list-ports                  # 4) 系统防火墙未放行则外�
 
 ### 4.2 升级 / 回滚
 
-- 升级：本地重新 build 一个新 tag（如 `v0.1.1`），`docker save` 后 scp 上去，改一下 compose 里的 `image:` 行，重跑 `bash deploy.sh`。脚本会先 `docker compose down` 再 `up`。
+- 升级：本地重新 build 一个新 tag（如 `v1.1.0`），`docker save` 后 scp 上去，改一下 compose 里的 `image:` 行，重跑 `bash deploy.sh`。脚本会先 `docker compose down` 再 `up`。
 - 回滚：只要旧镜像包还在 `/opt/memory-hand/` 里，把 compose 的 `image:` 改回旧 tag，再跑一次 `deploy.sh <旧包名>` 即可。`data_store/` 内的 JSONL 不删。
+- V1.1 起结构化记忆写入 `data_store/v1.1/memory.jsonl`；V1.0 的 `data_store/memory.jsonl` 保持原样作回滚依据，服务不会自动读取或迁移。
 
 ### 4.3 部署自检清单（申请 Key 前逐条打勾）
 
 - [ ] `curl http://<公网IP>:7878/health` 返回 `{"status":"ok"}`
 - [ ] `POST /add` 官方样例 payload 返回 200 且 `success=true`
-- [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/memory.jsonl` 只有一条（幂等）
+- [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/v1.1/memory.jsonl` 只有一条（幂等）
 - [ ] `POST /search` 对刚写入的 `user_id` 能召回，`top_k` 生效
 - [ ] `user_id=A` 的查询召不回 `user_id=B` 的记忆（**跨用户隔离**，红线）
 - [ ] 安全组/防火墙已放开服务器 `7878/tcp`，以及云主机映射的公网端口（如 `17187`）
