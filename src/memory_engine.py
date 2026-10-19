@@ -20,7 +20,7 @@
 它自己内部切块，绝不跨消息边界。unit 分数按 Parent 取最大值聚合，每个 Parent
 只返回一次，content 是最高分 unit 的原文并带 [role] 标签。
 所有返回 content 共享 MAX_RESPONSE_CONTENT_CHARS 硬预算，放不下的候选跳过；
-data 长度不超过 top_k，没有任何词面证据时返回空列表。
+data 长度不超过 top_k；得分为负的命中不返回，没有任何词面证据时返回空列表。
 
 V1.0 的 data_store/memory.jsonl 已把 messages 拼平成 content，role 与消息边界
 不可恢复；本版不读取旧格式，旧文件保留作 V1.0 回滚与基线。
@@ -179,7 +179,7 @@ class MemoryStore:
                 "created_at": datetime.now(timezone.utc).strftime(
                     "%Y-%m-%dT%H:%M:%SZ"),
             }
-            self._append_file(mem)
+            self._append_file(mem) # 写入磁盘
             self._memories.append(mem)
             self._by_user.setdefault(user_id, []).append(mem)
             self._ids_by_user.setdefault(user_id, set()).add(mid)
@@ -233,11 +233,12 @@ class MemoryStore:
             scores = bm25.get_scores(query_tokens)
             query_set = set(query_tokens)
 
-            # unit -> Parent：取该 Parent 的最高分 unit，命中 unit 只保留有词面证据的。
-            # 不用 score <= 0 当相关性门槛：负 IDF 下正相关也可能得负分。
+            # unit -> Parent：取该 Parent 的最高分 unit；负分与无词面证据的 unit 跳过。
             best = {}
             for unit, unit_set, score in zip(units, token_sets, scores):
                 if not (query_set & unit_set):
+                    continue
+                if score < 0:
                     continue
                 mi = unit[0]
                 prev = best.get(mi)

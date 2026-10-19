@@ -21,15 +21,11 @@
 
 ```
 memory-hand/
-├── src/                    # 全部 Python 代码
+├── src/                    # 服务代码
 │   ├── app.py              # FastAPI 服务：/health  /add  /search
 │   ├── memory_engine.py    # JSONL 持久化 + BM25 检索 + 中英混合分词
 │   ├── service_log.py      # 服务日志（stdout + data_store/service.log 双写）
-│   ├── dataset_adapter.py  # 本地数据集接入（评测用）
-│   ├── evaluate.py         # 本地评测脚本（Smoke 前的自测）
-│   ├── run_add_client.py   # 把经验池批量 /add 进服务
-│   ├── llm_clinet.py       # LLM 摘要客户端（Day 2 Memory Schema 用）
-│   └── download_dataset.py # 拉取 SWEContextBench 到 data/
+│   └── llm_clinet.py       # LLM 摘要客户端（Day 2 Memory Schema 用）
 ├── requirements.txt
 ├── .env                    # API Key（已 gitignore，不提交）
 ├── Dockerfile              # 生产镜像
@@ -39,6 +35,7 @@ memory-hand/
 ├── data/                   # 数据集（已 gitignore）
 ├── data_store/             # 运行时持久化目录（挂载卷）
 │   └── official_requests.jsonl  # 官方 /add、/search 原始请求，供本地回放
+├── evaluate/               # 本地模拟官方评测（Add/Search/Agent/验证）
 ├── reports/                # 评测产物（已 gitignore）
 └── PLAN_10_DAYS.md         # 10 天优化路线图
 ```
@@ -62,10 +59,13 @@ uvicorn app:app --app-dir src --host 0.0.0.0 --port 7878
 curl http://127.0.0.1:7878/health
 # -> {"status":"ok"}
 
-# 4) 导入数据 + 本地评测（在仓库根执行）
-python src/run_add_client.py --split lite --run-id local   # 写入经验池
-python src/evaluate.py --split lite --run-id local         # 逐任务 /search 算指标
+# 4) 模拟官方评测：真实 /add 回放 + 解题 Agent + 官方 test patch 验证
+#    首次先建工作区：evaluate/.venv/Scripts/python.exe evaluate/setup_workspace.py
+evaluate/.venv/Scripts/python.exe evaluate/run_eval.py --mode oracle
+evaluate/.venv/Scripts/python.exe evaluate/run_eval.py --mode agent --memory relevant
 ```
+
+详见 `evaluate/README.md`。
 
 `.env` 关键项（`LLM_MODE` 即模型名；未填或填 `none` 时 `summarize()` 直接抛 `RuntimeError`，不再有离线回退）：
 
