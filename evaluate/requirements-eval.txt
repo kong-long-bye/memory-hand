@@ -1,0 +1,9 @@
+# 本地评测环境（Python 3.10）
+# astropy 5.0 是任务 base_commit 的等价替身：官方 test patch 可应用，修复前失败
+astropy==5.0
+numpy==1.21.6
+pytest
+hypothesis
+jieba
+rank_bm25
+openai
