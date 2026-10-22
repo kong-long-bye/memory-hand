@@ -378,6 +378,69 @@ def test_identifier_like_prefixes_are_not_treated_as_markers():
         assert span.kind == "summary"
         assert span.body == content
 
+
+BINNED_SOURCE = ("[tool_result]\n"
+                 "astropy/timeseries/binned.py\n"
+                 "   120\tdef _relax_required_columns(self, columns):\n"
+                 "   121\t    self._columns = columns\n"
+                 "   122\t    return self._columns")
+BINNED_PATCH = ('[tool_use Edit]\n' + json.dumps({
+    "file_path": "/testbed/astropy/timeseries/binned.py",
+    "old_string": "    self._columns = columns",
+    "new_string": "    self._columns = list(columns)",
+}))
+
+
+def test_multiple_anchors_union_entities_within_same_parent():
+    """第二个锚点带来的实体，能让只与它相关的证据也进入组装。"""
+    mem = _mem(
+        ("user", PROBLEM),
+        ("user", BINNED_SOURCE),
+        ("assistant", BINNED_PATCH),
+    )
+    builder = EvidenceBuilder()
+    single = builder.render(mem, _unit(0, mem), QUERY, 20000)
+    both = builder.render(mem, [_unit(0, mem), _unit(1, mem)], QUERY, 20000)
+
+    assert "binned.py" not in single
+    assert "+    self._columns = list(columns)" not in single
+    assert "+    self._columns = list(columns)" in both
+    assert _kinds(both).count("patch") == 1
+
+
+def test_single_unit_and_one_item_list_render_identically():
+    mem = _full_mem()
+    builder = EvidenceBuilder()
+    assert (builder.render(mem, _unit(0, mem), QUERY, 20000)
+            == builder.render(mem, [_unit(0, mem)], QUERY, 20000))
+
+
+def test_search_returns_one_record_per_parent_with_multiple_anchors(tmp_path):
+    pytest.importorskip("rank_bm25")
+    pytest.importorskip("jieba")
+    from memory_engine import MemoryStore, parent_id
+
+    store = MemoryStore(tmp_path / "mem.jsonl")
+    messages = [
+        {"role": "user", "content": PROBLEM},
+        {"role": "assistant", "content": READ},
+        {"role": "user", "content": SOURCE},
+        {"role": "assistant", "content": TEST_CMD},
+        {"role": "user", "content": ERROR},
+        {"role": "assistant", "content": PATCH},
+        {"role": "user", "content": TEST_OK},
+        {"role": "assistant", "content": SUMMARY},
+    ]
+    assert store.add("req-1", messages, "u1", "s1")
+
+    first = store.search("u1", QUERY, top_k=10)
+    second = store.search("u1", QUERY, top_k=10)
+
+    assert len(first) == 1
+    assert first[0]["id"] == parent_id(messages)
+    assert first[0]["score"] > 0
+    assert first == second
+
     for content in ("tool_result_summary: 1 passed in 0.12s " + "detail " * 40,
                     "[tool_result_summary] 1 passed in 0.12s " + "detail " * 40):
         span = _only_span("user", content)

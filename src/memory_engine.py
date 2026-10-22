@@ -18,8 +18,9 @@
 
 检索单位是 message：普通消息整条进 BM25；超过 CHUNK_INDEX_TRIGGER 的消息只在
 它自己内部切块，绝不跨消息边界。unit 分数按 Parent 取最大值聚合，每个 Parent
-只返回一次；content 由 EvidenceBuilder 在同一 Parent 内组装相关证据，
-BM25 命中的 unit 始终保留，排序与预算仍由本模块控制。
+只返回一次；content 由 EvidenceBuilder 在同一 Parent 内组装相关证据，BM25
+命中的最高分 unit 始终保留，并额外取前 ANCHOR_UNITS 个 unit 作为证据锚点，
+排序与预算仍由本模块控制。
 所有返回 content 共享 MAX_RESPONSE_CONTENT_CHARS 硬预算，放不下的候选跳过；
 data 长度不超过 top_k；得分为负的命中不返回，没有任何词面证据时返回空列表。
 
@@ -47,6 +48,7 @@ STORE_PATH = STORE_DIR / "v1.1" / "memory.jsonl" # 结构化存储，与 V1.0 �
 
 CHUNK_SIZE = 4000                # 超长消息内部的块目标大小（按行边界断，不切碎一行）
 CHUNK_INDEX_TRIGGER = 20000      # 不超过该长度的 message 整条作为一个检索单元
+ANCHOR_UNITS = 3                 # 每个 Parent 最多取几个高分 unit 作为证据锚点
 MAX_RESPONSE_CONTENT_CHARS = 60000  # 单次 /search 所有 content 的硬预算（含角色标签）
 
 
@@ -226,37 +228,34 @@ class MemoryStore:
                 return []
             # bm25 是一个units的索引，
             # units是一个元组列表，表示这个units在用户记忆的位置和范围，通过记忆下标得到mem，通过消息下标得到message，通过快下标+偏移，得到具体的内容范围和角色
-            # token_sets是一个集合列表，表示每个unit的具体内容分词后的结果
-            bm25, units, token_sets = self._get_index(user_id) # 得到这个用户的索引
+            bm25, units, _ = self._get_index(user_id) # 得到这个用户的索引
             if bm25 is None:
                 return []
             # 得到每一个unit的分数
             scores = bm25.get_scores(query_tokens)
-            query_set = set(query_tokens)
 
-            # unit -> Parent：取该 Parent 的最高分 unit；负分与无词面证据的 unit 跳过。
-            best = {}
-            # 找到parent中最大的unit，来表示这个parent的分数
-            for unit, unit_set, score in zip(units, token_sets, scores):
-                # if not (query_set & unit_set):
-                #     continue
+            # unit -> Parent：Parent 的分数仍是最高分 unit，但证据锚点取前
+            # ANCHOR_UNITS 个 unit，让同一 Parent 里分散的证据一起参与组装。
+            per_parent = {}
+            for unit, score in zip(units, scores):
                 if score < 0:
                     continue
-                mi = unit[0]
-                prev = best.get(mi)
-                if prev is None or score > prev[0]:
-                    best[mi] = (float(score), unit)
+                per_parent.setdefault(unit[0], []).append((float(score), unit))
 
-            ranked = sorted(best.items(),
-                            key=lambda kv: kv[1][0], reverse=True)
+            ranked = []
+            for mi, bucket in per_parent.items():
+                bucket.sort(key=lambda item: item[0], reverse=True)
+                ranked.append((mi, bucket[0][0],
+                               [unit for _, unit in bucket[:ANCHOR_UNITS]]))
+            ranked.sort(key=lambda item: item[1], reverse=True)
             # 全局预算按排名顺序花：放不下的候选跳过并继续看后面的，
             # 但保留项始终按相关性降序，data 长度不超过 top_k
             results, remaining = [], MAX_RESPONSE_CONTENT_CHARS # 全局预算，单位字（60k）
-            for mi, (score, unit) in ranked:
+            for mi, score, anchors in ranked:
                 if len(results) >= top_k:
                     break
                 content = self._evidence_builder.render(
-                    docs[mi], unit, query, remaining)
+                    docs[mi], anchors, query, remaining)
                 if not content:
                     continue
                 results.append({

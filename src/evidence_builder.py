@@ -3,7 +3,8 @@
 
 只改变返回内容的组织方式，不参与打分：BM25、Parent 聚合和全局预算都保持
 V1.1 不变。安全规则：
-- BM25 命中的 unit 所在消息永远是 anchor，保证命中不丢；
+- BM25 命中的最高分 unit 所在消息永远是 anchor，保证命中不丢；同 Parent 的
+  前多个高分 unit 一起作为锚点，只合并实体，不改变 Parent 的分数与排序；
 - 其他证据必须与 query 或 anchor 共享具体的文件路径 / snake_case 符号 /
   测试名；仅同 Parent、仅相邻、仅宽泛类名（如 TimeSeries）或单个通用异常名
   （如 ValueError）不算；
@@ -391,50 +392,74 @@ class EvidenceBuilder:
       :param query: 查询
       :param max_chars: 最大字符数
     """
-    def render(self, mem, anchor_unit, query, max_chars):
-        """返回组装好的证据文本；放不下时由调用方跳过该候选。"""
+    def render(self, mem, anchor_units, query, max_chars):
+        """返回组装好的证据文本；放不下时由调用方跳过该候选。
+
+        anchor_units 可以是单个 unit，也可以是同一 Parent 内按分数排序的
+        多个 unit；多个锚点时实体取并集，但每个 Parent 仍只渲染一条内容。
+        """
         limit = min(int(max_chars), MAX_PARENT_CONTENT_CHARS)
         if limit <= 0 or not mem.get("messages"):
             return ""
-        anchor_index, anchor_start, anchor_end = (
-            anchor_unit[1], anchor_unit[3], anchor_unit[4])
+        if isinstance(anchor_units, tuple):
+            anchor_units = [anchor_units]
+        if not anchor_units:
+            return ""
         # 得到query的路径和强实体，作为anchor的关联实体；query也提取路径和强实体
         query_paths, query_strong = _entities(query or "")
         #合并集合，自动去重
         relevant = frozenset(query_paths | query_strong)
 
         spans = list(self._spans(mem))
-        anchor_span = next(
-            (s for s in spans
-             if s.message_index == anchor_index and s.start <= anchor_end
-             and s.end >= anchor_start), None)
-        if anchor_span is None:
-            # BM25 命中的是 thinking 等未分类片段时，仍保留原文；标成 note
-            # 而不是 source/patch，避免把推理伪装成可执行证据。
-            message = mem["messages"][anchor_index].get("content") or ""
-            text = message[anchor_start:anchor_end]
-            thinking = _THINKING_RE.match(text)
-            if thinking:
-                text = text[thinking.end():].lstrip()
-            paths, strong = _entities(text)
-            anchor_span = EvidenceSpan(
-                anchor_index, anchor_start, anchor_end,
-                mem["messages"][anchor_index].get("role") or "",
-                "note", text, file_paths=paths, strong=strong)
-            spans.append(anchor_span)
+        anchor_spans, anchor_ranges = [], {}
+        for unit in anchor_units:
+            anchor_index, anchor_start, anchor_end = unit[1], unit[3], unit[4]
+            anchor_span = next(
+                (s for s in spans
+                 if s.message_index == anchor_index and s.start <= anchor_end
+                 and s.end >= anchor_start), None)
+            if anchor_span is None:
+                # BM25 命中的是 thinking 等未分类片段时，仍保留原文；标成 note
+                # 而不是 source/patch，避免把推理伪装成可执行证据。
+                message = mem["messages"][anchor_index].get("content") or ""
+                text = message[anchor_start:anchor_end]
+                thinking = _THINKING_RE.match(text)
+                if thinking:
+                    text = text[thinking.end():].lstrip()
+                paths, strong = _entities(text)
+                anchor_span = EvidenceSpan(
+                    anchor_index, anchor_start, anchor_end,
+                    mem["messages"][anchor_index].get("role") or "",
+                    "note", text, file_paths=paths, strong=strong)
+                spans.append(anchor_span)
+            if anchor_span in anchor_spans:
+                # 同一条消息的多个块同时命中时合并覆盖范围
+                start, end = anchor_ranges[id(anchor_span)]
+                anchor_ranges[id(anchor_span)] = (
+                    min(start, anchor_start), max(end, anchor_end))
+                continue
+            anchor_spans.append(anchor_span)
+            anchor_ranges[id(anchor_span)] = (anchor_start, anchor_end)
 
-        anchor_relevant = set(anchor_span.strong | anchor_span.file_paths)
-        if anchor_span.primary_path:
-            anchor_relevant.add(anchor_span.primary_path)
-            anchor_relevant.add(anchor_span.primary_path.rsplit("/", 1)[-1])
-        relation = relevant | frozenset(anchor_relevant)
+        relation = set(relevant)
+        for anchor_span in anchor_spans:
+            relation |= anchor_span.strong | anchor_span.file_paths
+            if anchor_span.primary_path:
+                relation.add(anchor_span.primary_path)
+                relation.add(anchor_span.primary_path.rsplit("/", 1)[-1])
+        relation = frozenset(relation)
 
         def same_group(span):
             """主文件不同的证据属于另一条任务，除非 query 明确点了它的符号/文件。"""
-            if (span is anchor_span or not span.primary_path
-                    or not anchor_span.primary_path):
+            if span in anchor_spans:
                 return True
-            if span.primary_path == anchor_span.primary_path:
+            if not span.primary_path:
+                return True
+            anchor_paths = [a.primary_path for a in anchor_spans if a.primary_path]
+            # thinking 之类的锚点没有主文件，不能因此对所有任务开门
+            if not anchor_paths:
+                return True
+            if span.primary_path in anchor_paths:
                 return True
             basename = span.primary_path.rsplit("/", 1)[-1]
             return (bool(span.strong & query_strong)
@@ -446,11 +471,11 @@ class EvidenceBuilder:
             # 工具结果可以继承工具调用的实体；错误日志只认直接匹配，避免
             # “pytest 没装”这类环境噪声被当成任务证据。
             inherited = bool(span.inherited & relation) and span.kind != "error"
-            if not (span is anchor_span or shared_entities or inherited):
+            if not (span in anchor_spans or shared_entities or inherited):
                 continue
             if not same_group(span):
                 continue
-            if span.kind in HIGH_STAKES and span is not anchor_span:
+            if span.kind in HIGH_STAKES and span not in anchor_spans:
                 # 单个通用符号（如 replace_column）不足以把别的任务拼进来
                 path_shared = bool(span.primary_path
                                    and span.primary_path in relation)
@@ -466,7 +491,7 @@ class EvidenceBuilder:
             relation_hits = len((span.strong | span.file_paths) & relation) * 2
             if span.primary_path and span.primary_path in relation:
                 relation_hits += 2
-            return (span is anchor_span, direct + relation_hits,
+            return (span in anchor_spans, direct + relation_hits,
                     span.message_index)
 
         parts, used = [], 0
@@ -480,10 +505,11 @@ class EvidenceBuilder:
                 if room < 80:
                     continue
                 if span.kind == "source":
-                    offset = max(0, anchor_start - span.start)
+                    anchor_range = anchor_ranges.get(id(span))
                     body = _focus_source(
                         span.body, relation, room,
-                        (offset, anchor_end) if span is anchor_span else None)
+                        (max(0, anchor_range[0] - span.start), anchor_range[1])
+                        if anchor_range else None)
                 elif span.kind == "error":
                     body = _head_tail(span.body, room)
                 else:
