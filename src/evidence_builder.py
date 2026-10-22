@@ -43,8 +43,17 @@ SECTION_ORDER = ("problem", "note", "source", "error", "patch", "test", "summary
 # patch/test/summary/error 一旦拼错代价高：要求同主文件，或至少两个实体支持
 HIGH_STAKES = ("error", "patch", "test", "summary")
 
-_TOOL_RE = re.compile(r"^\[tool_use ([A-Za-z_]+)\]\s*(\{.*\})\s*$", re.S)
-_TOOL_RESULT = "[tool_result]"
+# 消息标记同时兼容 "[tool_use Bash] {...}" 与 "tool_use Bash {...}"。
+# 用 (?!\w) 而非 \b，避免 thinking_about / tool_usage /
+# tool_result_summary 这类普通标识符被误判为消息标记。
+_TOOL_MARK = (
+    r"(?:\[tool_use (?P<bracket>[A-Za-z_][A-Za-z0-9_]*)\]"
+    r"|tool_use (?P<plain>[A-Za-z_][A-Za-z0-9_]*))")
+_TOOL_RE = re.compile(r"^" + _TOOL_MARK + r"\s*(?P<data>\{.*\})\s*\Z", re.S)
+_TOOL_MARK_RE = re.compile(r"^" + _TOOL_MARK)
+_TOOL_RESULT_RE = re.compile(
+    r"^(?:\[tool_result\]|tool_result(?!\w)(?:\s*:\s*)?)")
+_THINKING_RE = re.compile(r"^(?:\[thinking\]|thinking(?!\w))")
 _TEST_CMD_RE = re.compile(
     r"\b(?:pytest|py\.test|unittest|tox|nox)\b|"
     r"(?:npm|yarn|pnpm)\s+test|\bgo\s+test\b|\bcargo\s+test\b", re.I)
@@ -177,38 +186,55 @@ def _parse_patch(index, name, data, content_len):
                         strong=strong, primary_path=path or None)
 
 
+def _tool_call(content):
+    """解析两种格式的 tool_use，返回 (工具名, 参数字典, JSON 原文)。
+
+    只识别消息开头的标记；JSON 无效/缺失时仍返回工具名与原文，由调用方
+    决定是否产生证据，避免不完整消息被误当成普通总结。
+    """
+    mark = _TOOL_MARK_RE.match(content)
+    if not mark:
+        return None, None, None
+    name = mark.group("bracket") or mark.group("plain")
+    match = _TOOL_RE.match(content)
+    if not match:
+        return name, None, None
+    raw = match.group("data")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return name, None, raw
+    if not isinstance(data, dict):
+        return name, None, raw
+    return name, data, raw
+
+
 def _parse_assistant(index, content):
-    # thinking通常是思考，这里不保留
-    if not content.strip() or content.startswith("thinking"):
+    # thinking 是思考内容，无论带不带方括号都不保留
+    if not content.strip() or _THINKING_RE.match(content):
         return []
-    # 判断是否是工具调用
-    if content.startswith("tool_use Bash"):
-        match = _TOOL_RE.match(content)
-        try:
-            data = json.loads(match.group(2)) if match else {}
-        except json.JSONDecodeError:
+    name, data, _ = _tool_call(content)
+    if name:
+        # 不完整的工具消息不回落成总结/补丁
+        if data is None:
             return []
-        command = data.get("command") or ""
         # 判断是否是测试命令
-        if not command or not _TEST_CMD_RE.search(command):
-            return []
-        # 提取文件路径和强实体，用于证据类型判断和关联实体
-        paths, strong = _entities(command)
-        return [EvidenceSpan(index, 0, len(content), "assistant", "test",
-                             "$ " + command, file_paths=paths, strong=strong,
-                             test_names=_TEST_NAME_RE.findall(command),
-                             primary_path=_primary_path(command))]
-    if content.startswith("[tool_use"):
-        match = _TOOL_RE.match(content)
-        if not match or match.group(1) not in ("Edit", "Write", "MultiEdit"):
-            return []
-        try:
-            data = json.loads(match.group(2))
-        except json.JSONDecodeError:
-            return []
-        # 解析工具调用，提取证据
-        span = _parse_patch(index, match.group(1), data, len(content))
-        return [span] if span else []
+        if name == "Bash":
+            command = data.get("command") or ""
+            if not command or not _TEST_CMD_RE.search(command):
+                return []
+            # 提取文件路径和强实体，用于证据类型判断和关联实体
+            paths, strong = _entities(command)
+            return [EvidenceSpan(index, 0, len(content), "assistant", "test",
+                                 "$ " + command, file_paths=paths,
+                                 strong=strong,
+                                 test_names=_TEST_NAME_RE.findall(command),
+                                 primary_path=_primary_path(command))]
+        if name in ("Edit", "Write", "MultiEdit"):
+            # 解析工具调用，提取证据
+            span = _parse_patch(index, name, data, len(content))
+            return [span] if span else []
+        return []
     # 末尾的普通 assistant 文本视为总结候选；阈值过滤掉过程性短句
     if len(content) >= 200:
         paths, strong = _entities(content)
@@ -234,13 +260,13 @@ def _classify_result(text):
 # 解析 user 文本，提取证据
 def _parse_user(index, content, inherited):
     # 判断是否是工具调用结果
-    if not content.startswith(_TOOL_RESULT):
-
+    marker = _TOOL_RESULT_RE.match(content)
+    if not marker:
         paths, strong = _entities(content)
         return [EvidenceSpan(index, 0, len(content), "user", "problem",
                              content, file_paths=paths, strong=strong,
                              primary_path=_primary_path(content))]
-    body = content[len(_TOOL_RESULT):].lstrip("\n ")
+    body = content[marker.end():].lstrip("\n ")
     kind = _classify_result(body)
     if not kind:
         return []
@@ -258,13 +284,11 @@ def _parse_user(index, content, inherited):
 def _tool_entities(content):
     """工具调用自带的实体，供紧随其后的 tool_result 继承。"""
     empty = (frozenset(), frozenset(), None)
-    if not content.startswith("[tool_use"):
+    _, _, raw = _tool_call(content)
+    if raw is None:
         return empty
-    match = _TOOL_RE.match(content)
-    if not match:
-        return empty
-    paths, strong = _entities(match.group(2))
-    return (paths, strong, _primary_path(match.group(2)))
+    paths, strong = _entities(raw)
+    return (paths, strong, _primary_path(raw))
 
 
 def _clip_lines(text, limit):
@@ -389,8 +413,9 @@ class EvidenceBuilder:
             # 而不是 source/patch，避免把推理伪装成可执行证据。
             message = mem["messages"][anchor_index].get("content") or ""
             text = message[anchor_start:anchor_end]
-            if text.startswith("[thinking]"):
-                text = text[len("[thinking]"):].lstrip()
+            thinking = _THINKING_RE.match(text)
+            if thinking:
+                text = text[thinking.end():].lstrip()
             paths, strong = _entities(text)
             anchor_span = EvidenceSpan(
                 anchor_index, anchor_start, anchor_end,
