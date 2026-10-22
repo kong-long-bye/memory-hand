@@ -48,8 +48,21 @@ _TOOL_RESULT = "[tool_result]"
 _TEST_CMD_RE = re.compile(
     r"\b(?:pytest|py\.test|unittest|tox|nox)\b|"
     r"(?:npm|yarn|pnpm)\s+test|\bgo\s+test\b|\bcargo\s+test\b", re.I)
+# 扩展名白名单跨语言；结尾 \b 防止 .cc 被截成 .c、.pyx 被截成 .py
+_PATH_EXTS = (
+    "py|pyi|pyx|pxd|ipynb|"
+    "java|kt|kts|scala|groovy|gradle|gvy|clj|cljs|cljc|edn|clojure|"
+    "cs|csx|fs|fsx|vb|swift|m|mm|h|"
+    "c|cc|cpp|cxx|hpp|hh|ino|rs|go|dart|php|rb|rake|gemspec|podspec|"
+    "ex|exs|erl|hrl|behav|hs|lhs|ml|mli|r|jl|lua|pl|pm|t|nim|zig|"
+    "ts|tsx|js|jsx|mjs|cjs|vue|svelte|astro|wxml|wxss|"
+    "html|htm|xhtml|xml|css|scss|sass|less|sql|proto|thrift|tf|tfvars|"
+    "sh|bash|zsh|fish|ps1|psm1|bat|cmd|mk|mak|cmake|"
+    "toml|json|jsonc|json5|ya?ml|yml|properties|cfg|conf|ini|env|"
+    "txt|md|markdown|rst|adoc|tex|org"
+)
 _PATH_RE = re.compile(
-    r"(?:/testbed/)?(?:[\w.-]+/)*[\w.-]+\.(?:py|pyx|txt|rst|toml|cfg|ini|json|ya?ml)")
+    r"(?:/testbed/)?(?:[\w.-]+/)*[\w.-]+\.(?:" + _PATH_EXTS + r")\b", re.I) #提取文件路径
 _WORD_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 _TEST_NAME_RE = re.compile(r"\btest_[A-Za-z0-9_]+\b")
 _NUMBERED_LINE_RE = re.compile(r"^\s*\d+\t", re.M)
@@ -79,27 +92,40 @@ class EvidenceSpan:
     def __init__(self, message_index, start, end, role, kind, body,
                  file_paths=(), strong=(), test_names=(), inherited=(),
                  primary_path=None):
+        # 该证据在 Parent 消息列表中的索引位置
         self.message_index = message_index
+        # 证据内容在消息 text 中的起止偏移量，用于回溯原文
         self.start = start
         self.end = end
+        # 消息角色（assistant / user）
         self.role = role
+        # 证据类型：problem / note / source / error / patch / test / summary
         self.kind = kind
+        # 证据的原始文本内容
         self.body = body
+        # 该证据中提到的所有文件路径集合
         self.file_paths = frozenset(file_paths)
+        # 强实体集合（函数名、类名、测试名等任务相关符号）
         self.strong = frozenset(strong)
+        # 该证据中出现的测试用例名（test_xxx）
         self.test_names = frozenset(test_names)
+        # 从前一条工具调用继承的实体，用于 tool_result 关联上下文
         self.inherited = frozenset(inherited)
+        # 该证据的主要文件路径（出现次数最多的路径），用于判断是否属于同一任务
         self.primary_path = primary_path
 
 
 def _entities(text):
     """返回 (文件路径, 强实体)；强实体只收具体到任务的符号。"""
     paths = set()
+    # 提取文件路径，去掉testbed前缀，并添加文件名作为路径
     for raw in _PATH_RE.findall(text or ""):
         path = raw.replace("/testbed/", "")
         paths.add(path)
         paths.add(path.rsplit("/", 1)[-1])
+
     strong = set()
+    # 提取强实体，也就是函数名、类名、测试名等任务相关符号
     for word in _WORD_RE.findall(text or ""):
         key = word.strip("_").lower()
         if not key or key in _PROTOCOL_WORDS or word.startswith("__"):
@@ -152,17 +178,21 @@ def _parse_patch(index, name, data, content_len):
 
 
 def _parse_assistant(index, content):
-    if not content.strip() or content.startswith("[thinking]"):
+    # thinking通常是思考，这里不保留
+    if not content.strip() or content.startswith("thinking"):
         return []
-    if content.startswith("[tool_use Bash]"):
+    # 判断是否是工具调用
+    if content.startswith("tool_use Bash"):
         match = _TOOL_RE.match(content)
         try:
             data = json.loads(match.group(2)) if match else {}
         except json.JSONDecodeError:
             return []
         command = data.get("command") or ""
+        # 判断是否是测试命令
         if not command or not _TEST_CMD_RE.search(command):
             return []
+        # 提取文件路径和强实体，用于证据类型判断和关联实体
         paths, strong = _entities(command)
         return [EvidenceSpan(index, 0, len(content), "assistant", "test",
                              "$ " + command, file_paths=paths, strong=strong,
@@ -176,6 +206,7 @@ def _parse_assistant(index, content):
             data = json.loads(match.group(2))
         except json.JSONDecodeError:
             return []
+        # 解析工具调用，提取证据
         span = _parse_patch(index, match.group(1), data, len(content))
         return [span] if span else []
     # 末尾的普通 assistant 文本视为总结候选；阈值过滤掉过程性短句
@@ -200,9 +231,11 @@ def _classify_result(text):
         return "source"
     return None
 
-
+# 解析 user 文本，提取证据
 def _parse_user(index, content, inherited):
+    # 判断是否是工具调用结果
     if not content.startswith(_TOOL_RESULT):
+
         paths, strong = _entities(content)
         return [EvidenceSpan(index, 0, len(content), "user", "problem",
                              content, file_paths=paths, strong=strong,
@@ -304,14 +337,18 @@ class EvidenceBuilder:
     def _spans(self, mem):
         mid = mem.get("id") or id(mem)
         if mid not in self._cache:
+            #spans 是一个空列表，用来存放提取出的证据。
+            # inherited 用来记录上一个 assistant 的工具调用信息，供当前 user 继承
             spans, inherited = [], (frozenset(), frozenset(), None)
             for index, message in enumerate(mem.get("messages") or []):
                 content = message.get("content") or ""
                 role = message.get("role") or ""
                 if role == "assistant":
+                    # 解析 assistant 文本，提取证据
                     spans.extend(_parse_assistant(index, content))
                     inherited = _tool_entities(content)
                 elif role == "user":
+                    # 解析 user 文本，提取证据
                     spans.extend(_parse_user(index, content, inherited))
                     inherited = (frozenset(), frozenset(), None)
                 else:
@@ -324,7 +361,12 @@ class EvidenceBuilder:
                          if s.kind != "summary" or s is last]
             self._cache[mid] = spans
         return self._cache[mid]
-
+    """
+      :param mem: Parent 记忆
+      :param anchor_unit: 锚定单元
+      :param query: 查询
+      :param max_chars: 最大字符数
+    """
     def render(self, mem, anchor_unit, query, max_chars):
         """返回组装好的证据文本；放不下时由调用方跳过该候选。"""
         limit = min(int(max_chars), MAX_PARENT_CONTENT_CHARS)
@@ -332,7 +374,9 @@ class EvidenceBuilder:
             return ""
         anchor_index, anchor_start, anchor_end = (
             anchor_unit[1], anchor_unit[3], anchor_unit[4])
+        # 得到query的路径和强实体，作为anchor的关联实体；query也提取路径和强实体
         query_paths, query_strong = _entities(query or "")
+        #合并集合，自动去重
         relevant = frozenset(query_paths | query_strong)
 
         spans = list(self._spans(mem))

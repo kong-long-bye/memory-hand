@@ -52,14 +52,14 @@ def _fence_for(text):
     return "`" * max(4, longest + 1)
 
 
-def _render(requests, searches, envs, max_chars):
+def _render(requests, searches, envs, max_chars, format_note, answer_label):
     lines = [
         "# 官方 /search 问题与当前代码回答",
         "",
         f"> 生成时间：{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}  ",
         "> 回答来源：`src/memory_engine.py` 的 `MemoryStore.search()`，"
         "记忆由 `data_store/official_requests.jsonl` 里的官方 `/add` 请求重建。  ",
-        "> 每条 content 前带 `[role]`，是当前 V1.1 返回格式。",
+        f"> {format_note}",
         "",
         "## 索引",
         "",
@@ -100,7 +100,7 @@ def _render(requests, searches, envs, max_chars):
             "",
         ])
         lines.extend(f"> {line}" for line in query.splitlines() or [""])
-        lines.extend(["", f"**当前代码的回答：** {len(results)} 条", ""])
+        lines.extend(["", f"**{answer_label}：** {len(results)} 条", ""])
 
         if not results:
             lines.append(
@@ -137,6 +137,13 @@ def main():
                         help="单条 content 截断长度；0 表示不截断")
     parser.add_argument(
         "--output", default=str(env.EVAL_ROOT / "official-search-qa.md"))
+    # V1.1 基线报告也要能原样重跑；V2.1 用 --jsonl 指向独立文件，不覆盖基线
+    parser.add_argument("--jsonl", default=str(
+        env.REPORTS_DIR / "official_search_qa.jsonl"))
+    parser.add_argument(
+        "--format-note",
+        default="每条 content 前带 `[role]`，是当前 V1.1 返回格式。")
+    parser.add_argument("--answer-label", default="当前代码的回答")
     args = parser.parse_args()
 
     requests = env.load_official_requests()
@@ -158,13 +165,14 @@ def main():
         top_k = max(1, min(int(body.get("top_k") or 5), 60))
         item["_results"] = memory.search(body.get("query") or "", top_k=top_k)
 
-    markdown = _render(requests, searches, envs, args.max_chars)
+    markdown = _render(requests, searches, envs, args.max_chars,
+                       args.format_note, args.answer_label)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown, encoding="utf-8")
 
-    env.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    jsonl_path = env.REPORTS_DIR / "official_search_qa.jsonl"
+    jsonl_path = Path(args.jsonl)
+    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for index, item in enumerate(searches, 1):
             body = item.get("body") or {}

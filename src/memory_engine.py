@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Memory Engine V1.1：结构化 Parent Memory + message 级 BM25。
+"""Memory Engine V2.1：结构化 Parent Memory + message 级 BM25 + 证据组装。
 
 存储（data_store/v1.1/memory.jsonl，每行一次 Add）::
 
@@ -18,7 +18,8 @@
 
 检索单位是 message：普通消息整条进 BM25；超过 CHUNK_INDEX_TRIGGER 的消息只在
 它自己内部切块，绝不跨消息边界。unit 分数按 Parent 取最大值聚合，每个 Parent
-只返回一次，content 是最高分 unit 的原文并带 [role] 标签。
+只返回一次；content 由 EvidenceBuilder 在同一 Parent 内组装相关证据，
+BM25 命中的 unit 始终保留，排序与预算仍由本模块控制。
 所有返回 content 共享 MAX_RESPONSE_CONTENT_CHARS 硬预算，放不下的候选跳过；
 data 长度不超过 top_k；得分为负的命中不返回，没有任何词面证据时返回空列表。
 
@@ -35,6 +36,8 @@ from pathlib import Path
 
 import jieba
 from rank_bm25 import BM25Okapi
+
+from evidence_builder import EvidenceBuilder
 
 
 jieba.setLogLevel(40)
@@ -103,13 +106,6 @@ def _messages_timestamp(messages):
     return max(marks) if marks else None
 
 
-def _evidence(mem: dict, unit: tuple) -> str:
-    """把命中的 unit 渲染成返回内容：角色标签 + 原始片段。"""
-    msg_i, start, end, role = unit[1], unit[3], unit[4], unit[5]
-    text = mem["messages"][msg_i].get("content") or ""
-    return "[{}]\n{}".format(role or "unknown", text[start:end])
-
-
 # 存储结果
 class MemoryStore:
     """MemoryStore：结构化 JSONL 持久化 + message 级 BM25。"""
@@ -123,6 +119,7 @@ class MemoryStore:
         self._ids_by_user = {}  # user_id -> {parent_id, ...} 同一 user 内去重
         self._index_by_user = {}  # user_id -> (bm25, units, tokens) 懒加载
         self._request_ids = set()  # 幂等：request_id 去重
+        self._evidence_builder = EvidenceBuilder()  # Parent 证据解析缓存
         self._load() # 加载现有数据
 
     # 持久化
@@ -201,7 +198,7 @@ class MemoryStore:
         if cached is None:
             docs = self._by_user.get(user_id, []) # 获取 Parent
             units, tokens = [], []
-            for mi, mem in enumerate(docs):
+            for mi, mem in enumerate(docs): # mi是记忆下表，
                 for msg_i, msg in enumerate(mem["messages"]):
                     text = msg.get("content") or ""
                     for ci, (s, e) in enumerate(_chunk_ranges(text)):
@@ -224,20 +221,25 @@ class MemoryStore:
         if not query_tokens:  # 没切出 token 时 BM25 没有意义，直接返回空
             return []
         with self._lock:
-            docs = self._by_user.get(user_id, [])
+            docs = self._by_user.get(user_id, []) # 得到这个用户的记忆
             if not docs:
                 return []
-            bm25, units, token_sets = self._get_index(user_id)
+            # bm25 是一个units的索引，
+            # units是一个元组列表，表示这个units在用户记忆的位置和范围，通过记忆下标得到mem，通过消息下标得到message，通过快下标+偏移，得到具体的内容范围和角色
+            # token_sets是一个集合列表，表示每个unit的具体内容分词后的结果
+            bm25, units, token_sets = self._get_index(user_id) # 得到这个用户的索引
             if bm25 is None:
                 return []
+            # 得到每一个unit的分数
             scores = bm25.get_scores(query_tokens)
             query_set = set(query_tokens)
 
             # unit -> Parent：取该 Parent 的最高分 unit；负分与无词面证据的 unit 跳过。
             best = {}
+            # 找到parent中最大的unit，来表示这个parent的分数
             for unit, unit_set, score in zip(units, token_sets, scores):
-                if not (query_set & unit_set):
-                    continue
+                # if not (query_set & unit_set):
+                #     continue
                 if score < 0:
                     continue
                 mi = unit[0]
@@ -249,12 +251,13 @@ class MemoryStore:
                             key=lambda kv: kv[1][0], reverse=True)
             # 全局预算按排名顺序花：放不下的候选跳过并继续看后面的，
             # 但保留项始终按相关性降序，data 长度不超过 top_k
-            results, remaining = [], MAX_RESPONSE_CONTENT_CHARS
+            results, remaining = [], MAX_RESPONSE_CONTENT_CHARS # 全局预算，单位字（60k）
             for mi, (score, unit) in ranked:
                 if len(results) >= top_k:
                     break
-                content = _evidence(docs[mi], unit)
-                if len(content) > remaining:
+                content = self._evidence_builder.render(
+                    docs[mi], unit, query, remaining)
+                if not content:
                     continue
                 results.append({
                     "id": docs[mi]["id"],
@@ -284,6 +287,7 @@ class MemoryStore:
             self._ids_by_user.clear()
             self._index_by_user.clear()
             self._request_ids.clear()
+            self._evidence_builder.clear()
             if self.path.exists():
                 self.path.unlink()
 
