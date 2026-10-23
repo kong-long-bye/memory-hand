@@ -30,6 +30,7 @@ V1.0 的 data_store/memory.jsonl 已把 messages 拼平成 content，role 与消
 
 import json
 import hashlib
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -50,6 +51,16 @@ CHUNK_SIZE = 4000                # 超长消息内部的块目标大小（按行
 CHUNK_INDEX_TRIGGER = 20000      # 不超过该长度的 message 整条作为一个检索单元
 ANCHOR_UNITS = 3                 # 每个 Parent 最多取几个高分 unit 作为证据锚点
 MAX_RESPONSE_CONTENT_CHARS = 60000  # 单次 /search 所有 content 的硬预算（含角色标签）
+
+
+def _retrieval_mode() -> str:
+    """渲染模式开关：v2_1（默认，固定分节）/ v3_0（状态判定+答案优先）。
+
+    只影响 content 的组装方式，不影响召回、排序、去重与持久化；
+    出问题时设 RETRIEVAL_MODE=v2_1 即可不改存储直接回滚。
+    """
+    raw = (os.environ.get("RETRIEVAL_MODE") or "v2_1").strip().lower()
+    return "v3_0" if raw in ("v3_0", "v3") else "v2_1"
 
 
 def memory_id(content: str) -> str:
@@ -121,7 +132,8 @@ class MemoryStore:
         self._ids_by_user = {}  # user_id -> {parent_id, ...} 同一 user 内去重
         self._index_by_user = {}  # user_id -> (bm25, units, tokens) 懒加载
         self._request_ids = set()  # 幂等：request_id 去重
-        self._evidence_builder = EvidenceBuilder()  # Parent 证据解析缓存
+        self.retrieval_mode = _retrieval_mode()  # v2_1 / v3_0，只影响 content 组装
+        self._evidence_builder = EvidenceBuilder(mode=self.retrieval_mode)
         self._load() # 加载现有数据
 
     # 持久化
@@ -275,6 +287,7 @@ class MemoryStore:
                                for mem in self._memories
                                for m in mem["messages"]),
             "total_users": len(self._by_user),
+            "retrieval_mode": self.retrieval_mode,
             "store_path": str(self.path),
         }
 

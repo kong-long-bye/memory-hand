@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""V2.1 Evidence Builder：在同一个 Parent 内选择与查询相关的证据并渲染。
+"""Evidence Builder：在同一个 Parent 内选择与查询相关的证据并渲染。
+
+两种渲染模式（env RETRIEVAL_MODE，默认 v2_1，可一键回滚）：
+- v2_1：固定分节 problem → note → source → error → patch → test → summary；
+- v3_0：先按"路径 + 符号"二元强关联把 patch/test/summary 绑定到当前问题，
+  判定 solution_status（verified_solution / patch_available / summary_only /
+  source_only / related_only），再按状态决定渲染顺序、预算与诚实声明；
+  绑不上的补丁/总结一律不渲染（False Solution 门禁）。
 
 只改变返回内容的组织方式，不参与打分：BM25、Parent 聚合和全局预算都保持
 V1.1 不变。安全规则：
@@ -18,6 +25,7 @@ V1.1 不变。安全规则：
 
 import difflib
 import json
+import os
 import re
 
 
@@ -43,6 +51,53 @@ MAX_SECTIONS = {
 SECTION_ORDER = ("problem", "note", "source", "error", "patch", "test", "summary")
 # patch/test/summary/error 一旦拼错代价高：要求同主文件，或至少两个实体支持
 HIGH_STAKES = ("error", "patch", "test", "summary")
+
+# ---- V3.0-lite：解答状态判定与答案优先渲染 ----
+# 只有绑定到当前问题的 patch/test/summary 才允许进入"解决方案"分节
+SOLUTION_KINDS = ("patch", "test", "summary")
+# 每种状态的单条内容预算（实验起点，仍受 MAX_PARENT_CONTENT_CHARS 与全局预算约束）
+STATUS_BUDGET = {
+    "verified_solution": 8000,
+    "patch_available": 8000,
+    "summary_only": 4000,
+    "source_only": 4000,
+    "related_only": 1000,
+}
+# 每种状态的分节顺序：答案性证据放最前，保证前 2KB 内出现补丁/测试
+STATUS_ORDER = {
+    "verified_solution": ("problem", "patch", "test", "source", "error",
+                          "summary"),
+    "patch_available": ("problem", "patch", "test", "source", "error",
+                        "summary"),
+    "summary_only": ("problem", "summary", "source", "error", "test"),
+    "source_only": ("problem", "source", "error", "test", "note"),
+    "related_only": ("note", "problem"),
+}
+# 诚实声明：明确告诉 Agent 记忆里的证据强度，防止把历史片段误当本题答案
+STATUS_NOTE = {
+    "verified_solution": (
+        "NOTE: the patch and test records above were verified in a PAST "
+        "session; the current repository may differ. Re-verify before "
+        "applying."),
+    "patch_available": (
+        "NOTE: a historical patch was found but no trusted passing-test "
+        "record. Re-verify before applying."),
+    "summary_only": (
+        "NOTE: only a historical fix summary for this problem; no directly "
+        "recoverable patch in memory."),
+    "source_only": (
+        "NOTE: this memory contains NO verified patch, fix summary, or "
+        "passing test for this problem. Above is historical source only "
+        "(may differ from the current repository); design and verify the "
+        "fix yourself."),
+    "related_only": (
+        "NOTE: only topically related historical fragments; not a solution "
+        "to this problem."),
+}
+# 测试结果判定：必须"有 passed 且无 failed/error"才算历史验证通过
+_TEST_PASS_RE = re.compile(r"\b\d+ passed\b", re.I)
+_TEST_FAIL_RE = re.compile(
+    r"\b\d+ failed\b|\b\d+ errors?\b|\bFAILED\b|\bERROR\b", re.I)
 
 # 消息标记同时兼容 "[tool_use Bash] {...}" 与 "tool_use Bash {...}"。
 # 用 (?!\w) 而非 \b，避免 thinking_about / tool_usage /
@@ -350,10 +405,48 @@ def _section_header(span, relevant):
     return header + "]"
 
 
-class EvidenceBuilder:
-    """Parent 内证据解析缓存 + 选择 + 渲染（Parent 内容不可变，按 id 缓存）。"""
+def _span_paths(span):
+    paths = set(span.file_paths)
+    if span.primary_path:
+        paths.add(span.primary_path)
+    return paths
 
-    def __init__(self):
+
+def _binds(span, focus_paths, focus_strong, query_strong):
+    """二元强关联：这条证据和当前问题是不是同一件事。
+
+    满足其一即绑定（对齐 V3.0 计划 §6.1 的"显式重合"与"工具调用链"）：
+    - 文件重合：证据路径（含继承自前一工具调用的路径，如测试结果之于
+      测试命令）与问题焦点路径有交集；
+    - 符号重合：与焦点共享 >= 2 个强符号；query 明确点名其中 1 个时，
+      再共享任意 1 个焦点符号也算。
+    仅同 Parent、仅时间邻近、仅共享宽泛类名都不算绑定。
+    """
+    inherited = span.inherited
+    if (_span_paths(span) & focus_paths) or (inherited & focus_paths):
+        return True
+    shared = (span.strong | inherited) & focus_strong
+    if len(shared) >= 2:
+        return True
+    return bool((span.strong | inherited) & query_strong) and bool(shared)
+
+
+def _test_passed(span):
+    return bool(_TEST_PASS_RE.search(span.body)
+                and not _TEST_FAIL_RE.search(span.body))
+
+
+class EvidenceBuilder:
+    """Parent 内证据解析缓存 + 选择 + 渲染（Parent 内容不可变，按 id 缓存）。
+
+    mode: "v2_1"（固定分节，默认）或 "v3_0"（解答状态判定 + 答案优先渲染）。
+    未显式传入时读 env RETRIEVAL_MODE，非法值一律回落 v2_1。
+    """
+
+    def __init__(self, mode=None):
+        raw = (mode or os.environ.get("RETRIEVAL_MODE")
+               or "v2_1").strip().lower()
+        self.mode = "v3_0" if raw in ("v3_0", "v3") else "v2_1"
         self._cache = {}
 
     def clear(self):
@@ -386,17 +479,12 @@ class EvidenceBuilder:
                          if s.kind != "summary" or s is last]
             self._cache[mid] = spans
         return self._cache[mid]
-    """
-      :param mem: Parent 记忆
-      :param anchor_unit: 锚定单元
-      :param query: 查询
-      :param max_chars: 最大字符数
-    """
     def render(self, mem, anchor_units, query, max_chars):
         """返回组装好的证据文本；放不下时由调用方跳过该候选。
 
         anchor_units 可以是单个 unit，也可以是同一 Parent 内按分数排序的
         多个 unit；多个锚点时实体取并集，但每个 Parent 仍只渲染一条内容。
+        mode=v3_0 时先判定解答状态，再按状态答案优先渲染。
         """
         limit = min(int(max_chars), MAX_PARENT_CONTENT_CHARS)
         if limit <= 0 or not mem.get("messages"):
@@ -405,6 +493,13 @@ class EvidenceBuilder:
             anchor_units = [anchor_units]
         if not anchor_units:
             return ""
+        sel = self._select(mem, anchor_units, query)
+        if self.mode == "v3_0":
+            return self._render_v3(mem, sel, limit)
+        return self._render_sections(sel, limit)
+
+    def _select(self, mem, anchor_units, query):
+        """锚点解析 + 实体关联选择，两种渲染模式共享（与 V2.1 完全一致）。"""
         # 得到query的路径和强实体，作为anchor的关联实体；query也提取路径和强实体
         query_paths, query_strong = _entities(query or "")
         #合并集合，自动去重
@@ -494,6 +589,22 @@ class EvidenceBuilder:
             return (span in anchor_spans, direct + relation_hits,
                     span.message_index)
 
+        return {
+            "related": related,
+            "score": score,
+            "relation": relation,
+            "relevant": relevant,
+            "anchor_spans": anchor_spans,
+            "anchor_ranges": anchor_ranges,
+            "query_paths": query_paths,
+            "query_strong": query_strong,
+        }
+
+    def _render_sections(self, sel, limit):
+        """V2.1 原路径：固定 SECTION_ORDER 分节渲染。"""
+        related, score = sel["related"], sel["score"]
+        relation = sel["relation"]
+        anchor_spans, anchor_ranges = sel["anchor_spans"], sel["anchor_ranges"]
         parts, used = [], 0
         for kind in SECTION_ORDER:
             candidates = sorted((s for s in related if s.kind == kind),
@@ -522,4 +633,115 @@ class EvidenceBuilder:
                     continue
                 parts.append(block)
                 used += len(block) + extra
+        return "\n\n".join(parts)
+
+    def _render_v3(self, mem, sel, limit):
+        """V3.0-lite：绑定判定 → solution_status → 答案优先渲染。
+
+        False Solution 门禁：绑不上当前问题的 patch/test/summary 一律不渲染；
+        状态与诚实声明永远输出，Agent 能明确知道记忆里有没有已验证的修复。
+        """
+        related = sel["related"]
+        anchor_spans = sel["anchor_spans"]
+        query_strong = sel["query_strong"]
+        relation = sel["relation"]
+        anchor_ranges = sel["anchor_ranges"]
+
+        # 问题焦点 = query 实体 ∪ 最高分锚点实体。故意不含次锚点：top-3 锚点
+        # 可能横跨同 Parent 的两条子任务，若都算焦点，B 任务的补丁会被绑成
+        # A 问题的答案（T2 负例）。上下文证据仍用全量 relation，只有
+        # patch/test/summary 的"是否同问题"判定收紧到主锚点。
+        focus_paths = set(sel["query_paths"])
+        focus_strong = set(query_strong)
+        top_anchor = anchor_spans[0]
+        focus_paths |= _span_paths(top_anchor)
+        focus_strong |= top_anchor.strong
+
+        bound_patches = [s for s in related if s.kind == "patch"
+                         and _binds(s, focus_paths, focus_strong, query_strong)]
+        patch_paths, patch_strong = set(), set()
+        for span in bound_patches:
+            patch_paths |= _span_paths(span)
+            patch_strong |= span.strong
+
+        def binds_solution(span):
+            return _binds(span, focus_paths | patch_paths,
+                          focus_strong | patch_strong, query_strong)
+
+        bound_tests = [s for s in related
+                       if s.kind == "test" and binds_solution(s)]
+        bound_summaries = [s for s in related
+                           if s.kind == "summary" and binds_solution(s)]
+        passed_tests = [t for t in bound_tests if _test_passed(t)]
+
+        kinds = {s.kind for s in related}
+        if bound_patches and passed_tests:
+            status = "verified_solution"
+        elif bound_patches:
+            status = "patch_available"
+        elif bound_summaries:
+            status = "summary_only"
+        elif kinds & {"source", "error", "problem", "test"}:
+            status = "source_only"
+        else:
+            status = "related_only"
+
+        budget = min(limit, STATUS_BUDGET[status])
+        note = STATUS_NOTE[status]
+        header = "[solution_status={} | parent={} | anchors={}]".format(
+            status, mem.get("id") or "-",
+            ",".join("m{}".format(s.message_index) for s in anchor_spans))
+        # 状态头和诚实声明必须放得下，否则宁可返回空也不给半截证据
+        reserve = len(header) + len(note) + 4
+        if budget - reserve < 80:
+            return ""
+
+        bound_ids = {id(s) for s in bound_patches + bound_tests
+                     + bound_summaries}
+        content_budget = budget - len(note) - 2
+        parts, used, seen = [header], len(header), set()
+        for kind in STATUS_ORDER[status]:
+            candidates = [s for s in related if s.kind == kind
+                          and (kind not in SOLUTION_KINDS
+                               or id(s) in bound_ids)]
+            if not candidates:
+                continue
+            if kind in ("patch", "test"):
+                # 版本序列按时间保留：多次修改时展示最终状态（最后 2 条）
+                candidates.sort(key=lambda s: s.message_index)
+                if len(candidates) > MAX_SECTIONS[kind]:
+                    candidates = candidates[-MAX_SECTIONS[kind]:]
+            else:
+                candidates.sort(key=sel["score"], reverse=True)
+                candidates = candidates[:MAX_SECTIONS[kind]]
+            for span in candidates:
+                # 去重：相同正文的源码/补丁只渲染一次
+                key = (span.kind, span.primary_path, span.body)
+                if key in seen:
+                    continue
+                header_line = _section_header(span, relation)
+                room = min(MAX_SECTION_CHARS[kind],
+                           content_budget - used - len(header_line) - 2)
+                if room < 80:
+                    continue
+                if span.kind == "source":
+                    anchor_range = anchor_ranges.get(id(span))
+                    body = _focus_source(
+                        span.body, relation, room,
+                        (max(0, anchor_range[0] - span.start), anchor_range[1])
+                        if anchor_range else None)
+                elif span.kind == "error":
+                    body = _head_tail(span.body, room)
+                else:
+                    body = _clip_lines(span.body, room)
+                if not body.strip():
+                    continue
+                block = header_line + "\n" + body
+                extra = 2  # parts 恒含状态头，每个块前都有 "\n\n" 分隔
+                if used + len(block) + extra > content_budget:
+                    continue
+                seen.add(key)
+                parts.append(block)
+                used += len(block) + extra
+        parts.append(note)
         return "\n\n".join(parts)
