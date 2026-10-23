@@ -171,6 +171,67 @@ def test_secondary_anchor_cannot_smuggle_other_task_patch():
     assert "[patch |" not in text
 
 
+def test_same_basename_in_different_package_does_not_bind():
+    """裸文件名（core.py）不得跨包绑定：io/ascii 的补丁不是 timeseries 的答案。
+
+    补丁作为次锚点强制进入 related（绕开 V2.1 选择门），专门考验 v3 绑定：
+    query 只点了裸名 core.py，修复前会因裸名交集把 io/ascii 补丁绑成答案。
+    """
+    ascii_patch = ('[tool_use Edit]\n' + json.dumps({
+        "file_path": "/testbed/astropy/io/ascii/core.py",
+        "old_string": "        return self.cols",
+        "new_string": "        return list(self.cols)",
+    }))
+    mem = _mem(
+        ("user", PROBLEM),
+        ("user", SOURCE),
+        ("assistant", ascii_patch),
+    )
+    text = _v3().render(
+        mem, [_unit(0, mem), _unit(2, mem)],
+        "missing required columns error message fix core.py", 20000)
+
+    assert _status(text) == "source_only"
+    assert "[patch |" not in text
+    assert "io/ascii" not in text
+
+
+def test_multitask_summary_anchor_does_not_donate_paths():
+    """最高分锚点是"全部变更清单"式总结时，它列的其它子任务路径不得进焦点。
+
+    复现官方 Search 23 缺陷：总结提到 io/ascii/core.py，io/ascii 补丁
+    因此被绑成 patch_available。修复后总结只贡献强符号，补丁绑不上。
+    """
+    summary = ("Summary of all changes: fixed a convert_numpy regression in "
+               "astropy/io/ascii/core.py and created the timeseries "
+               "subpackage. " + "detail " * 40)
+    ascii_patch = ('[tool_use Edit]\n' + json.dumps({
+        "file_path": "/testbed/astropy/io/ascii/core.py",
+        "old_string": "convert_numpy(numpy.str)",
+        "new_string": "convert_numpy(str)",
+    }))
+    mem = _mem(("assistant", summary), ("assistant", ascii_patch))
+    text = _v3().render(mem, _unit(0, mem), QUERY, 20000)
+
+    assert _status(text) in ("summary_only", "related_only")
+    assert "[patch |" not in text
+    assert "convert_numpy(numpy.str)" not in text
+
+
+def test_note_anchor_donates_paths_for_binding():
+    """note（thinking）锚点是单任务现场思考，路径照常捐入焦点（T4 行为）。"""
+    thinking = ("[thinking] The check runs in astropy/timeseries/core.py "
+                "so the fix belongs there. " + "reasoning " * 20)
+    mem = _mem(
+        ("assistant", thinking),
+        ("assistant", PATCH),
+    )
+    text = _v3().render(mem, _unit(0, mem), "misleading error message", 20000)
+
+    assert _status(text) == "patch_available"
+    assert "[patch |" in text
+
+
 # ---- 答案优先渲染 ----
 
 def test_answer_first_patch_before_source():

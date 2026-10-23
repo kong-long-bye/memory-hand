@@ -416,14 +416,18 @@ def _binds(span, focus_paths, focus_strong, query_strong):
     """二元强关联：这条证据和当前问题是不是同一件事。
 
     满足其一即绑定（对齐 V3.0 计划 §6.1 的"显式重合"与"工具调用链"）：
-    - 文件重合：证据路径（含继承自前一工具调用的路径，如测试结果之于
-      测试命令）与问题焦点路径有交集；
+    - 文件重合：证据与焦点的**完整路径**（含目录）有交集，路径可来自
+      继承的前一工具调用（如测试结果之于测试命令）。裸文件名（如
+      "core.py"）不参与绑定：astropy 里 timeseries/core.py 与
+      io/ascii/core.py 同名，按裸名交集会把别的子任务补丁绑成答案；
     - 符号重合：与焦点共享 >= 2 个强符号；query 明确点名其中 1 个时，
       再共享任意 1 个焦点符号也算。
     仅同 Parent、仅时间邻近、仅共享宽泛类名都不算绑定。
     """
     inherited = span.inherited
-    if (_span_paths(span) & focus_paths) or (inherited & focus_paths):
+    span_full = {p for p in (_span_paths(span) | inherited) if "/" in p}
+    focus_full = {p for p in focus_paths if "/" in p}
+    if span_full & focus_full:
         return True
     shared = (span.strong | inherited) & focus_strong
     if len(shared) >= 2:
@@ -651,10 +655,15 @@ class EvidenceBuilder:
         # 可能横跨同 Parent 的两条子任务，若都算焦点，B 任务的补丁会被绑成
         # A 问题的答案（T2 负例）。上下文证据仍用全量 relation，只有
         # patch/test/summary 的"是否同问题"判定收紧到主锚点。
+        # summary 锚点只贡献强符号、不贡献路径：多任务 Parent 的最终总结是
+        # "全部变更清单"，它列出的路径是目录而非问题定义，若捐入焦点会把
+        # 其它子任务的补丁绑成答案（官方 Search 23 实测缺陷）。note（thinking）
+        # 锚点是单任务现场的思考，路径可信，照常捐赠（官方 T4 依赖此行为）。
         focus_paths = set(sel["query_paths"])
         focus_strong = set(query_strong)
         top_anchor = anchor_spans[0]
-        focus_paths |= _span_paths(top_anchor)
+        if top_anchor.kind != "summary":
+            focus_paths |= _span_paths(top_anchor)
         focus_strong |= top_anchor.strong
 
         bound_patches = [s for s in related if s.kind == "patch"
@@ -698,6 +707,15 @@ class EvidenceBuilder:
 
         bound_ids = {id(s) for s in bound_patches + bound_tests
                      + bound_summaries}
+
+        def sort_key(span):
+            # problem/source 等上下文分节优先展示与焦点相关的，
+            # 避免别的子任务的问题描述占位（官方 Search 03 实测缺陷）
+            affinity = bool(
+                ((_span_paths(span) | span.inherited) & focus_paths)
+                or ((span.strong | span.inherited) & focus_strong))
+            return (affinity, sel["score"](span))
+
         content_budget = budget - len(note) - 2
         parts, used, seen = [header], len(header), set()
         for kind in STATUS_ORDER[status]:
@@ -712,7 +730,7 @@ class EvidenceBuilder:
                 if len(candidates) > MAX_SECTIONS[kind]:
                     candidates = candidates[-MAX_SECTIONS[kind]:]
             else:
-                candidates.sort(key=sel["score"], reverse=True)
+                candidates.sort(key=sort_key, reverse=True)
                 candidates = candidates[:MAX_SECTIONS[kind]]
             for span in candidates:
                 # 去重：相同正文的源码/补丁只渲染一次
