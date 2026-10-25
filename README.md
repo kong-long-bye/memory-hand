@@ -27,7 +27,7 @@ memory-hand/
 │   ├── app.py              # FastAPI 服务：/health  /add  /search
 │   ├── memory_engine.py    # JSONL 持久化 + BM25 检索 + 中英混合分词
 │   ├── service_log.py      # 服务日志（stdout + data_store/service.log 双写）
-│   └── llm_clinet.py       # LLM 摘要客户端（Day 2 Memory Schema 用）
+│   └── llm_clinet.py       # 离线摘要模块（未被服务导入，服务不调用 LLM）
 ├── requirements.txt
 ├── .env                    # API Key（已 gitignore，不提交）
 ├── Dockerfile              # 生产镜像
@@ -68,6 +68,8 @@ evaluate/.venv/Scripts/python.exe evaluate/run_eval.py --mode agent --memory rel
 ```
 
 详见 `evaluate/README.md`。
+
+> **当前部署版本不使用 LLM**：服务不读取下列 LLM 配置，`llm_clinet.py` 未被任何服务或评测脚本导入；这些项仅为历史遗留/离线实验保留，不影响 `/add`、`/search` 的返回。
 
 `.env` 关键项（`LLM_MODE` 即模型名；未填或填 `none` 时 `summarize()` 直接抛 `RuntimeError`，不再有离线回退）：
 

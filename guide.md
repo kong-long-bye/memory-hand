@@ -3,6 +3,13 @@
 > 本文档对应比赛提交清单中的两项：「部署信息完整」与「已披露原始工作」。
 > 部署操作步骤见 [README.md](./README.md) §4；本文只写提交方需要申报的事实。
 
+> **关键声明：本系统未使用大语言模型（LLM）。**
+> `/add`、`/search`、`/health` 全链路不调用任何 LLM、Embedding 模型或外部模型 API；
+> 检索与内容组装全部在本地完成（BM25 + 规则引擎）。
+> `.env` 中保留的 `LLM_MODE` / `OPENAI_API_KEY` / `OPENAI_BASE_URL`（其中模型名为
+> deepseek）属于历史遗留配置，**服务代码不读取**，不影响任何接口的返回值；
+> 仓库中的 `src/llm_clinet.py` 也**未被任何服务或评测脚本导入**，不参与运行。
+
 ---
 
 ## 一、部署信息
@@ -67,7 +74,7 @@ BM25 索引（本地约 0.4–0.9 s），随后复用内存索引。
 3. **检索串行**：`/add`、`/search` 共用全局锁，单次请求毫秒级，高并发时排队而非并行。
 4. **模式切换需重启**：`RETRIEVAL_MODE` 在进程启动时读取一次；改 `.env` 后需要 `docker compose up -d --force-recreate` 或重跑 `deploy.sh` 才生效。
 5. **数据目录随版本固定**：本版本读写 `data_store/v3.0/memory.jsonl`；V1.1 的 `data_store/v1.1/` 不读取、不自动迁移，升级或回滚若需保留历史数据须手动复制该 JSONL。
-6. **`/search` 无外部依赖**：不调用 LLM、不调用 Embedding 服务、不访问外网；不存在第三方额度或超时导致检索失败的风险。
+6. **全链路无外部模型调用**：不调用 LLM、不调用 Embedding 服务、不访问外网；`.env` 中的 deepseek 等模型配置不被服务读取，不存在第三方额度、限流或超时导致检索失败的风险。
 7. **负分过滤**：BM25 得分 `< 0` 的命中不返回；无任何词面证据时返回空列表（不是错误）。
 8. **时区**：服务与日志时间均为 UTC。
 
@@ -105,7 +112,7 @@ BM25 索引（本地约 0.4–0.9 s），随后复用内存索引。
 | `fastapi` | ≥ 0.115 | MIT | HTTP 服务框架 |
 | `uvicorn` | ≥ 0.30 | BSD-3-Clause | ASGI 服务器（单 worker） |
 | `pydantic` | ≥ 2.7 | MIT | 请求/响应模型校验 |
-| `openai` | 3.26.1 | Apache-2.0 | 离线摘要客户端 `llm_clinet.py`；**不在 `/search` 路径上** |
+| `openai` | 3.26.1 | Apache-2.0 | **服务未使用**：随依赖安装，但服务代码不导入；仅仓库保留的 `llm_clinet.py` 引用，而该模块未被任何服务或评测脚本导入 |
 
 完整依赖清单见 [`requirements.txt`](./requirements.txt)。上述库均按原样使用，
 未复制、未改写其内部实现。实验脚本中出现的 `text-embedding-v4` 调用仅用于
@@ -139,3 +146,16 @@ V2.2 消融实验，生产镜像的检索链路不包含任何 Embedding 或 LLM
 
 上述方法的实现、单测（68 项）与本地回放证据均在仓库 `src/`、`tests/`、`evaluate/` 中，
 可直接复现；方法评估只使用本地回放指标，端到端得分以平台官方评测为准。
+
+### 2.6 未使用项声明
+
+本提交**不使用**以下组件或能力：
+
+- **大语言模型（LLM）**：无 OpenAI / DeepSeek / 通义等任何模型调用；环境变量中的 deepseek 配置未被读取。
+- **Embedding / 向量检索**：生产链路无 Dense 召回、无向量数据库（FAISS/Milvus 等）。
+- **外部检索或 RAG 框架**：无 LangChain / LlamaIndex，无第三方 rerank 服务。
+- **自训练、微调模型或私有模型权重**：无。
+- **跨样本共享状态**：无；索引与缓存全部按 `user_id` 隔离。
+
+`/search` 的输出完全由 `src/memory_engine.py` 与 `src/evidence_builder.py` 的本地
+BM25 打分和规则化证据组装决定；最终答案由平台统一生成，本服务不生成答案。
