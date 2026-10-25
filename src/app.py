@@ -60,9 +60,10 @@ def _record_official_request(path: str, body: dict, request: Request) -> None:
 
 _boot = store.stats()
 logger.info(
-    "[启动] 服务版本=%s Python=%s 存储文件=%s 已加载记忆=%s 检索单元总数=%s "
-    "用户空间数=%s 日志文件=%s",
-    app.version, sys.version.split()[0], _boot["store_path"],
+    "[启动] 服务版本=%s 检索模式=%s Python=%s 存储文件=%s 已加载记忆=%s "
+    "检索单元总数=%s 用户空间数=%s 日志文件=%s",
+    app.version, _boot["retrieval_mode"], sys.version.split()[0],
+    _boot["store_path"],
     _boot["total_memories"], _boot["total_units"], _boot["total_users"],
     LOG_FILE)
 
