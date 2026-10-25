@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # 服务器侧一键部署：加载本地 docker 镜像包 + 启动 compose
-# 用法：把 memory-hand-v0.1.1.tar / docker-compose.yml / .env / deploy.sh 放到同一目录，
+# 用法：把 memory-hand-v3_0.tar / docker-compose.yml / .env / deploy.sh 放到同一目录，
 #      然后执行：bash deploy.sh
 set -euo pipefail
 
-IMAGE_TAR="${1:-memory-hand-v1.0.tar}"
+IMAGE_TAR="${1:-memory-hand-v3_0.tar}"
 COMPOSE_FILE="docker-compose.yml"
 ENV_FILE=".env"
 PORT=7878

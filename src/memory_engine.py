@@ -45,7 +45,7 @@ from evidence_builder import EvidenceBuilder
 jieba.setLogLevel(40)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent # 仓库根（容器内 /app）
 STORE_DIR = PROJECT_ROOT / "data_store" # 数据存储目录
-STORE_PATH = STORE_DIR / "v1.1" / "memory.jsonl" # 结构化存储，与 V1.0 文件隔离
+STORE_PATH = STORE_DIR / "v3.0" / "memory.jsonl" # 结构化存储
 
 CHUNK_SIZE = 4000                # 超长消息内部的块目标大小（按行边界断，不切碎一行）
 CHUNK_INDEX_TRIGGER = 20000      # 不超过该长度的 message 整条作为一个检索单元

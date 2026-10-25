@@ -57,11 +57,11 @@ HIGH_STAKES = ("error", "patch", "test", "summary")
 SOLUTION_KINDS = ("patch", "test", "summary")
 # 每种状态的单条内容预算（实验起点，仍受 MAX_PARENT_CONTENT_CHARS 与全局预算约束）
 STATUS_BUDGET = {
-    "verified_solution": 8000,
-    "patch_available": 8000,
-    "summary_only": 4000,
-    "source_only": 4000,
-    "related_only": 1000,
+    "verified_solution": 8000, # 验证
+    "patch_available": 8000, # 可用
+    "summary_only": 4000, # 仅总结
+    "source_only": 4000, # 仅源码
+    "related_only": 1000, # 仅相关
 }
 # 每种状态的分节顺序：答案性证据放最前，保证前 2KB 内出现补丁/测试
 STATUS_ORDER = {

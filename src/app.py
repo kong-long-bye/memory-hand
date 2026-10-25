@@ -24,7 +24,7 @@ from memory_engine import MemoryStore, PROJECT_ROOT
 from service_log import brief, get_logger
 
 
-app = FastAPI(title="Agent Memory Service", version="1.1.0")
+app = FastAPI(title="Agent Memory Service", version="3.0")
 store = MemoryStore() # 存储结构
 
 # 日志落在挂载卷里，容器重启和 docker logs 轮转之后仍然可读；

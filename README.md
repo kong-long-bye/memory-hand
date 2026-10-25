@@ -3,6 +3,8 @@
 > 赛道：**代码记忆榜 (Coding Memory)** + **文本记忆榜 (Textual Memory)**
 > 组别：**学术方法榜**（开源可复现）
 > 当前阶段：Day 1 Baseline（JSONL 存储 + BM25 检索 + 官方格式 /add /search）
+>
+> 提交用**部署信息与原始工作披露**见 [guide.md](./guide.md)（版本、接口地址、鉴权、容量、运行限制、复用声明、个人方法）。
 
 ---
 
@@ -131,7 +133,7 @@ Response：`{"success": true, "request_id": "...", "user_id": "...", "session_id
   "query":   "string",
   "user_id": "string",
   "top_k":   100,
-  "options": ["..."]        // 可选
+  "options": ["..."]        // 可
 }
 ```
 Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at": "..."}]}`
@@ -179,7 +181,7 @@ Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at"
 
 ```
 /opt/memory-hand/
-├── memory-hand-v0.1.1.tar        # docker save -o 导出的镜像包
+├── memory-hand-v3_0.tar        # docker save -o 导出的镜像包
 ├── docker-compose.yml          # 仓库里拷一份
 ├── .env                        # 环境变量（自行上传，不在仓库）
 ├── deploy.sh                   # 仓库里拷一份
@@ -194,8 +196,8 @@ Response：`{"data": [{"id": "...", "content": "...", "score": 0.0, "created_at"
 cd d:\Code\study\memory-hand
 # 每次改动必须换一个新 tag，否则 docker load 会命中同名旧镜像缓存，
 # 服务器实际跑的还是旧代码（端口、LLM 客户端修复全部失效）
-docker build -t memory-hand:v0.1.1 .
-docker run --rm memory-hand:v0.1.1 ps aux | head -1   # 可选：确认 CMD 已含 --port 7878
+docker build -t memory-hand:v3_0 .
+docker run --rm memory-hand:v3_0 ps aux | head -1   # 可选：确认 CMD 已含 --port 7878
 ```
 
 **Step 2 — 本地导出镜像包**
@@ -203,7 +205,7 @@ docker run --rm memory-hand:v0.1.1 ps aux | head -1   # 可选：确认 CMD 已�
 ```bash
 mkdir -p dist
 # 用 -o 指定输出文件；Windows PowerShell 没有 gzip，不要用 `| gzip`
-docker save -o dist/memory-hand-v0.1.1.tar memory-hand:v0.1.1
+docker save -o dist/memory-hand-v3_0.tar memory-hand:v3_0
 ls -lh dist/                                      # 一般 200–400MB
 ```
 
@@ -212,7 +214,7 @@ ls -lh dist/                                      # 一般 200–400MB
 ```bash
 IP=<公网IP>
 ssh root@$IP "mkdir -p /opt/memory-hand"
-scp dist/memory-hand-v0.1.1.tar     root@$IP:/opt/memory-hand/
+scp dist/memory-hand-v3_0.tar     root@$IP:/opt/memory-hand/
 scp docker-compose.yml             root@$IP:/opt/memory-hand/
 scp deploy.sh                      root@$IP:/opt/memory-hand/
 scp .env                           root@$IP:/opt/memory-hand/
@@ -224,7 +226,7 @@ ssh root@$IP "chmod 600 /opt/memory-hand/.env"
 ```bash
 ssh root@$IP
 cd /opt/memory-hand
-bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v0.1.1.tar
+bash deploy.sh                    # 默认加载当前目录下的 memory-hand-v3_0.tar
 ```
 
 脚本依次做 4 件事：
@@ -247,19 +249,20 @@ firewall-cmd --list-ports                  # 4) 系统防火墙未放行则外�
 
 ### 4.2 升级 / 回滚
 
-- 升级：本地重新 build 一个新 tag（如 `v1.1.0`），`docker save` 后 scp 上去，改一下 compose 里的 `image:` 行，重跑 `bash deploy.sh`。脚本会先 `docker compose down` 再 `up`。
+- 升级：本地重新 build 一个新 tag（如 `v3_1`），`docker save` 后 scp 上去，改一下 compose 里的 `image:` 行，重跑 `bash deploy.sh`。脚本会先 `docker compose down` 再 `up`。
 - 回滚：只要旧镜像包还在 `/opt/memory-hand/` 里，把 compose 的 `image:` 改回旧 tag，再跑一次 `deploy.sh <旧包名>` 即可。`data_store/` 内的 JSONL 不删。
-- V1.1 起结构化记忆写入 `data_store/v1.1/memory.jsonl`；V1.0 的 `data_store/memory.jsonl` 保持原样作回滚依据，服务不会自动读取或迁移。
+- V3.0 起结构化记忆写入 `data_store/v3.0/memory.jsonl`；V1.1 的 `data_store/v1.1/` 与 V1.0 的 `data_store/memory.jsonl` 保持原样，服务不会自动读取或迁移。
+- 从旧版本升级且要保留历史记忆时，先停容器，把旧 `memory.jsonl` 复制到 `data_store/v3.0/`，再启动。
 
 ### 4.3 部署自检清单（申请 Key 前逐条打勾）
 
 - [ ] `curl http://<公网IP>:7878/health` 返回 `{"status":"ok"}`
 - [ ] `POST /add` 官方样例 payload 返回 200 且 `success=true`
-- [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/v1.1/memory.jsonl` 只有一条（幂等）
+- [ ] 同一 `request_id` 连发两次：第二次仍成功，但 `data_store/v3.0/memory.jsonl` 只有一条（幂等）
 - [ ] `POST /search` 对刚写入的 `user_id` 能召回，`top_k` 生效
 - [ ] `user_id=A` 的查询召不回 `user_id=B` 的记忆（**跨用户隔离**，红线）
 - [ ] 安全组/防火墙已放开服务器 `7878/tcp`，以及云主机映射的公网端口（如 `17187`）
-- [ ] `docker images` 能看到 `memory-hand:v0.1.1`；git tag / compose image tag / 提交材料三者一致
+- [ ] `docker images` 能看到 `memory-hand:v3_0`；git tag / compose image tag / 提交材料三者一致
 - [ ] `/opt/memory-hand/data_store/` 存在且可写，容器重启不丢数据
 - [ ] `.env` 权限 `600`，`git status` 确认 `.env` 未被追踪
 
@@ -273,7 +276,7 @@ Timeout             : Search P95 <= 3s；Add P95 <= 2s；平台侧建议设 30s
 Rate Limit          : 无
 Payload Size        : Add 单请求 <= 32MB
 Data Persistence    : JSONL 挂载卷 /opt/memory-hand/data_store
-Version             : Docker image memory-hand:v0.1.1 (git <sha>)
+Version             : Docker image memory-hand:v3_0 (git <sha>)
 Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 ```
 
@@ -290,6 +293,7 @@ Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 5. **容量声明**：本 README §4.4 表。
 6. **Benchmark 自测报告**：`reports/eval_<run_id>_<ts>.json`，展示 Recall@5/10、MRR、nDCG@10、Noise@10、HN-Rejection。
 7. **方法说明**：当前 = BM25 + 中英混合分词 + JSONL 持久化；10 天路线见 `PLAN_10_DAYS.md`（Day 2 LLM 摘要、Day 3 向量、Day 4 RRF、Day 5 Code-aware Rerank、Day 7 Query Rewrite…）。
+8. **部署信息与原始工作披露**：[guide.md](./guide.md)（已部署版本、接口地址、鉴权、容量、运行限制、复用与个人方法说明）。
 
 ---
 
