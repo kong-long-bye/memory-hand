@@ -69,7 +69,7 @@ evaluate/.venv/Scripts/python.exe evaluate/run_eval.py --mode agent --memory rel
 
 详见 `evaluate/README.md`。
 
-> **当前部署版本不使用 LLM**：服务不读取下列 LLM 配置，`llm_clinet.py` 未被任何服务或评测脚本导入；这些项仅为历史遗留/离线实验保留，不影响 `/add`、`/search` 的返回。
+> **当前部署版本不使用 LLM（同时也没有使用dense，只有BM25）**：服务不读取下列 LLM 配置，`llm_clinet.py` 未被任何服务或评测脚本导入；这些项仅为历史遗留/离线实验保留，不影响 `/add`、`/search` 的返回。
 
 `.env` 关键项（`LLM_MODE` 即模型名；未填或填 `none` 时 `summarize()` 直接抛 `RuntimeError`，不再有离线回退）：
 
