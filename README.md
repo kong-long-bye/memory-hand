@@ -312,24 +312,3 @@ Downtime SLA        : 保持期 提交日 ~ 2026-11-04，7x24 可访问
 
 ---
 
-## 附：10 天优化路线速览
-
-| Day | 目标 | 状态 |
-|-----|------|------|
-| 1 | Dataset + Add Client + BM25 Store + Search + Eval 闭环 | ✅ |
-| 2 | Memory Schema（summary / problem / solution / files / functions / errors / keywords） | 🟡 LLM 客户端已就绪 |
-| 3 | 加入 Embedding + FAISS | ⏳ |
-| 4 | Hybrid Search + RRF | ⏳ |
-| 5 | Code-aware Rerank（file/function/error/repo match） | ⏳ |
-| 6 | Memory 压缩格式 A/B | ⏳ |
-| 7 | Query Rewrite | ⏳ |
-| 8 | Noise / Hard-negative Filtering | ⏳ |
-| 9 | Ablation 表 | ⏳ |
-| 10 | 工程化 & 提交 | ⏳ |
-
-详见 [PLAN_10_DAYS.md](./PLAN_10_DAYS.md)。
-
----
-
-**核心心法**（引自 10 天计划）：
-> 比赛胜负点不是 Vector Database，而是 **Memory Ranking**。
