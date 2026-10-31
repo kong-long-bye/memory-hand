@@ -23,7 +23,7 @@
 | 参赛组别 | 学术方法榜（开源可复现） |
 | 服务实现版本 | **3.0**（V3.0-lite 实现） |
 | 镜像 tag | **`memory-hand:v3_0`** |
-| 代码 Commit | **`61e61df`**（master，含 `feat/v3.0-lite` 全部提交；该 commit 之后仅有文档改动） |
+| 代码 Commit | **`61e61df`**（master，含 `feat/v3.0-lite` 全部提交；该 commit 之后只有readme和guild文档改动，最新代码和这个版本没有区别，拉取最新版本即可） |
 | API 契约 | 官方 `/add`、`/search`、`/health`，字段与路径未做任何改动 |
 | 检索渲染模式 | `RETRIEVAL_MODE=v3_0`（启动日志可核；`v2_1` 为原始基线，可环境变量一键回滚） |
 
