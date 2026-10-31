@@ -62,7 +62,7 @@ RETRIEVAL_MODE=v3_0
 ```
 
 
-> **当前部署版本不使用 LLM**：服务不读取下列 LLM 配置，`llm_clinet.py` 未被任何服务或评测脚本导入；这些项仅为历史遗留/离线实验保留，不影响 `/add`、`/search` 的返回。
+> **当前部署版本不使用 LLM（同时也没有使用dense，只有BM25）**：服务不读取下列 LLM 配置，`llm_clinet.py` 未被任何服务或评测脚本导入；这些项仅为历史遗留/离线实验保留，不影响 `/add`、`/search` 的返回。
 
 > 因此只需要配置 RETRIEVAL_MODE=v3_0
 

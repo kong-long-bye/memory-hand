@@ -19,7 +19,7 @@
 | 项目 | 值 |
 | --- | --- |
 | 系统名称 | Memory Hand |
-| 参赛赛道 | 代码记忆榜（Coding Memory）+ 文本记忆榜（Textual Memory） |
+| 参赛赛道 | 代码记忆榜（Coding Memory） |
 | 参赛组别 | 学术方法榜（开源可复现） |
 | 服务实现版本 | **3.0**（V3.0-lite 实现） |
 | 镜像 tag | **`memory-hand:v3_0`** |
